@@ -1,0 +1,16 @@
+from .registry import Registry
+
+TOKENIZERS = Registry('tokenizers')
+TRANSFORMS = Registry('transforms')
+DATASETS = Registry('datasets')
+LLM_BACKBONES = Registry('llm_backbones')
+VISION_BACKBONES = Registry('vision_backbones')
+PROJECTORS = Registry('projectors')
+HEADS = Registry('heads')
+VLAS = Registry('vlas')
+RUNNERS = Registry('runners')
+COLLATORS = Registry('collators')
+METRICS = Registry('metrics')
+PROCESSORS = Registry('processors')
+VLM_BACKBONES = Registry('vlm_backbones')
+OPERATORS = Registry('operators')
