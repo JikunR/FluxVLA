@@ -217,6 +217,7 @@ class FlowMatchingHead(nn.Module):
                      num_layers=16,
                      output_dim=1024,
                      positional_embeddings=None),
+                 ori_action_dim=None,
                  *args,
                  **kwargs):
         super().__init__()
@@ -261,6 +262,7 @@ class FlowMatchingHead(nn.Module):
             self.position_embedding = nn.Embedding(max_seq_len,
                                                    self.input_embedding_dim)
             nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
+        self.ori_action_dim = ori_action_dim
 
     def forward(self, input_features: torch.Tensor, states: torch.Tensor,
                 attention_mask: torch.Tensor, embodiment_ids: torch.Tensor,
@@ -307,6 +309,10 @@ class FlowMatchingHead(nn.Module):
         )
         pred = self.action_decoder(model_output, embodiment_ids)
         pred_actions = pred[:, -actions.shape[1]:]
+
+        if self.ori_action_dim is not None:
+            pred_actions = pred_actions[:, :, :self.ori_action_dim]
+            velocity = velocity[:, :, :self.ori_action_dim]
 
         # Slice out only the action portion of pred and target.
         loss = F.mse_loss(
@@ -374,6 +380,8 @@ class FlowMatchingHead(nn.Module):
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
+        if self.ori_action_dim is not None:
+            actions = actions[:, :, :self.ori_action_dim]
         return actions
 
     def sample_time(self, batch_size, device, dtype):

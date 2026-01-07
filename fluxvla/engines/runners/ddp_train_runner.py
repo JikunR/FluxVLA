@@ -132,12 +132,18 @@ class DDPTrainRunner(BaseTrainRunner):
         self.vla.from_pretrained()
 
         # Apply LoRA if specified
-        if self.cfg.model.use_lora:
+        if hasattr(self.cfg.model, 'use_lora') and self.cfg.model.use_lora:
+            # Use configured lora_alpha, default to lora_rank if not specified
+            lora_alpha = getattr(self.cfg.model, 'lora_alpha',
+                                 self.cfg.model.lora_rank)
+            # Get modules_to_save for full fine-tuning of specific modules
+            modules_to_save = getattr(self.cfg.model, 'modules_to_save', None)
             lora_config = LoraConfig(
                 r=self.cfg.model.lora_rank,
-                lora_alpha=min(self.cfg.model.lora_rank, 16),
+                lora_alpha=lora_alpha,
                 lora_dropout=self.cfg.model.lora_dropout,
                 target_modules=self.cfg.model.lora_target_modules,
+                modules_to_save=modules_to_save,
                 init_lora_weights='gaussian',
             )
             self.vla = get_peft_model(self.vla, lora_config)
@@ -160,19 +166,63 @@ class DDPTrainRunner(BaseTrainRunner):
 
         # Apply Gradient Checkpointing (after moving to device)
         if self.enable_gradient_checkpointing:
-            from torch.utils.checkpoint import checkpoint
-            from transformers.modeling_layers import GradientCheckpointingLayer
+            from functools import partial
 
-            for module in self.vla.modules():
-                if isinstance(module, GradientCheckpointingLayer):
-                    module.gradient_checkpointing = True
-                    module._gradient_checkpointing_func = checkpoint
+            import torch.nn as nn
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (  # noqa: E501
+                CheckpointImpl, apply_activation_checkpointing,
+                checkpoint_wrapper)
+
+            # Collect checkpoint layer classes (same as FSDP)
+            checkpoint_layer_classes = set()
+
+            # Add LLM backbone transformer layers
+            if hasattr(self, 'llm_transformer_layer_cls'):
+                checkpoint_layer_classes.add(self.llm_transformer_layer_cls)
+
+            # Add Vision Transformer blocks (for timm models)
+            try:
+                from timm.models.vision_transformer import Block as VisionBlock
+                checkpoint_layer_classes.add(VisionBlock)
+            except ImportError:
+                pass
+
+            # Add LLM expert layers
+            if hasattr(self.vla,
+                       'llm_expert') and self.vla.llm_expert is not None:
+                if hasattr(self.vla.llm_expert, 'transformer_layer_cls'):
+                    checkpoint_layer_classes.add(
+                        self.vla.llm_expert.transformer_layer_cls)
+
+            # Apply checkpoint wrapper if we have layer classes
+            if checkpoint_layer_classes:
+                non_reentrant_wrapper = partial(
+                    checkpoint_wrapper,
+                    checkpoint_impl=CheckpointImpl.NO_REENTRANT)
+
+                def check_fn(submodule: nn.Module) -> bool:
+                    for layer_cls in checkpoint_layer_classes:
+                        if isinstance(submodule, layer_cls):
+                            return True
+                    return False
+
+                apply_activation_checkpointing(
+                    self.vla,
+                    checkpoint_wrapper_fn=non_reentrant_wrapper,
+                    check_fn=check_fn)
+
+                if overwatch.is_rank_zero():
+                    overwatch.info(
+                        f'Applied gradient checkpointing to: '
+                        f'{[cls.__name__ for cls in checkpoint_layer_classes]}'
+                    )
 
         self.vla = DDP(
             self.vla,
             device_ids=[device_id],
             find_unused_parameters=True,
-            gradient_as_bucket_view=True)
+            gradient_as_bucket_view=True,
+            static_graph=True)
 
         if overwatch.is_rank_zero():
             overwatch.info(
@@ -221,13 +271,15 @@ class DDPTrainRunner(BaseTrainRunner):
                     os.path.join(save_dir, 'vlm_backbone_config.json'))
 
             # Handle LoRA merging and checkpoint creation
-            if self.cfg.model.use_lora:
+            if hasattr(self.cfg.model, 'use_lora') and self.cfg.model.use_lora:
                 # First, save the current LoRA adapter to save_dir
                 # This is necessary before loading it with
                 # PeftModel.from_pretrained
                 self.vla.module.save_pretrained(save_dir)
 
                 base_vla = build_vla_from_cfg(self.cfg.model)
+                # Load pretrained weights before merging LoRA
+                base_vla.from_pretrained()
                 merged_vla = PeftModel.from_pretrained(base_vla, save_dir)
                 merged_vla = merged_vla.merge_and_unload()
                 model_state_dict = merged_vla.state_dict()

@@ -8,7 +8,7 @@ model = dict(
         'fluxvla/models/third_party_models/eagle2_hg_model'),
     vla_head=dict(
         type='FlowMatchingHead',
-        state_dim=14,
+        state_dim=32,
         hidden_size=1024,
         input_embedding_dim=1536,
         num_layers=1,
@@ -16,7 +16,7 @@ model = dict(
         num_steps=32,
         num_inference_timesteps=4,
         traj_length=10,
-        action_dim=14),
+        action_dim=32),
     freeze_vlm_backbone=False,
     name_mapping={
         'vlm_backbone.vlm': 'backbone.eagle_model',
@@ -33,7 +33,7 @@ inference_model = dict(
         'fluxvla/models/third_party_models/eagle2_hg_model'),
     vla_head=dict(
         type='FlowMatchingHead',
-        state_dim=14,
+        state_dim=32,
         hidden_size=1024,
         input_embedding_dim=1536,
         num_layers=1,
@@ -41,7 +41,7 @@ inference_model = dict(
         num_steps=32,
         num_inference_timesteps=4,
         traj_length=10,
-        action_dim=14),
+        action_dim=32),
     freeze_vlm_backbone=False,
     name_mapping={
         'vlm_backbone.vlm': 'backbone.eagle_model',
@@ -80,7 +80,7 @@ train_dataloader = dict(
                 transforms=[
                     dict[str, str | int | list[str] | dict[str, list[str]]](
                         type='ProcessParquetInputs',
-                        embodiment_id=30,
+                        embodiment_id=18,
                         parquet_keys=[
                             'observation.state', 'observation.eepose',
                             'timestamp', 'actions', 'info', 'stats',
@@ -116,7 +116,8 @@ train_dataloader = dict(
                     ),
                     dict(
                         type='NormalizeStatesAndActions',
-                        action_dim=14,
+                        action_dim=32,
+                        state_dim=32,
                         state_key='proprio',
                         action_key='action',
                         norm_type='mean_std')
@@ -158,7 +159,6 @@ runner = dict(
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
-    sharding_strategy='full-shard',
     change_key_name=False)
 
 inference = dict(
@@ -170,7 +170,7 @@ inference = dict(
     },
     dataset=dict(
         type='PrivateInferenceDataset',
-        embodiment_id=30,
+        embodiment_id=18,
         img_keys=['cam_high', 'cam_left_wrist', 'cam_right_wrist'],
         transforms=[
             dict(
@@ -192,7 +192,7 @@ inference = dict(
             ),
             dict(
                 type='NormalizeStatesAndActions',
-                state_dim=14,
+                state_dim=32,
                 state_key='proprio',
                 action_key='action',
                 norm_type='mean_std')

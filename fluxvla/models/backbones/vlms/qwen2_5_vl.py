@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VLAttention, Qwen2_5_VLDecoderLayer, Qwen2_5_VLMLP)
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
+    Qwen2_5_VLDecoderLayer
 
 from fluxvla.engines import VLM_BACKBONES
 from .hf_vlm import VLMBackbone
@@ -34,6 +34,12 @@ class QWen2_5VL(VLMBackbone):
                  vlm_config: Dict = None,
                  vlm_path: Optional[str] = None) -> None:
         super().__init__(vlm_backbone_id, vlm_config, vlm_path=vlm_path)
+
+        if hasattr(self.vlm.config, 'attn_implementation'):
+            self.vlm.config.attn_implementation = 'flash_attention_2'
+
+        if hasattr(self.vlm.config, 'use_memory_efficient_attention'):
+            self.vlm.config.use_memory_efficient_attention = True
 
     @property
     def transformer_layer_cls(self) -> Type[nn.Module]:
@@ -98,6 +104,6 @@ class QWen2_5VL(VLMBackbone):
         """
         transformer_block_policy = partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls={Qwen2_5_VLAttention, Qwen2_5_VLMLP},
+            transformer_layer_cls={Qwen2_5_VLDecoderLayer},
         )
         return transformer_block_policy

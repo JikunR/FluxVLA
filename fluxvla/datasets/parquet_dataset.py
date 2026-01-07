@@ -234,12 +234,16 @@ class LiberoParquetEvalDataset:
         transforms (List[Dict]): List of transform configs applied in order.
     """
 
-    def __init__(self, norm_stats: Any, task_suite_name: str,
-                 transforms: List[Dict]) -> None:
+    def __init__(self,
+                 norm_stats: Any,
+                 task_suite_name: str,
+                 transforms: List[Dict],
+                 num_padding_imgs: int = 0) -> None:
 
         # Build image/token transforms (parquet-style sequential list)
         self.transforms = [build_transform_from_cfg(t) for t in transforms]
         self.task_suite_name = task_suite_name
+        self.num_padding_imgs = num_padding_imgs
         if isinstance(norm_stats, str):
             with open(norm_stats, 'r', encoding='utf-8') as f:
                 self.norm_stats = json.load(f)
@@ -265,9 +269,24 @@ class LiberoParquetEvalDataset:
             data['lang_masks'], 'tolist') else list(data['lang_masks'])
 
         # Proprio
+        img_masks = data.get('img_masks', None)
+        pixel_values = data['pixel_values']
+        if img_masks is None:
+            # Fallback: all True masks based on pixel_values shape
+            num_imgs = pixel_values.shape[0] // 3
+            img_masks = [True] * num_imgs
+        else:
+            img_masks = list(img_masks)
+        # Add padding images with zero values and False masks
+        if self.num_padding_imgs > 0:
+            padding_img = pixel_values.new_zeros(3, pixel_values.shape[-2],
+                                                 pixel_values.shape[-1])
+            padding_imgs = padding_img.repeat(self.num_padding_imgs, 1, 1)
+            pixel_values = torch.cat([pixel_values, padding_imgs], dim=0)
+            img_masks.extend([False] * self.num_padding_imgs)
         batch: Dict[str, Any] = dict(
-            images=data['pixel_values'].cuda().unsqueeze(0),
-            img_masks=torch.tensor([[True, True]]).cuda(),
+            images=pixel_values.cuda().unsqueeze(0),
+            img_masks=torch.tensor([img_masks]).cuda(),
             lang_tokens=tokens.unsqueeze(0).cuda(),
             lang_masks=torch.tensor(token_mask).unsqueeze(0).cuda(),
         )

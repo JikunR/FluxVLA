@@ -119,8 +119,7 @@ runner = dict(
     warmup_ratio=0.0,
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
-    mixed_precision_dtype='bf16',
-    sharding_strategy='full-shard')
+    mixed_precision_dtype='bf16')
 
 eval = dict(
     type='LiberoEvalRunner',
