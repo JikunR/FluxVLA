@@ -97,11 +97,15 @@ class ProcessParquetInputs():
                  parquet_keys: List[str],
                  video_keys: List[str],
                  name_mappings: Dict = None,
-                 embodiment_id: int = None):
+                 embodiment_id: int = None,
+                 embodiment_dim: int = None,
+                 num_padding_imgs: int = 0):
         self.parquet_keys = parquet_keys
         self.video_keys = video_keys
         self.name_mappings = name_mappings
         self.embodiment_id = embodiment_id
+        self.embodiment_dim = embodiment_dim
+        self.num_padding_imgs = num_padding_imgs
 
     def decode_video_frames_torchvision(
         self,
@@ -246,6 +250,12 @@ class ProcessParquetInputs():
                 0.1)[0]  # Convert to HWC format
             images.append(frame.numpy())
             img_masks.append(True)
+        # Add padding images with zero values and False masks
+        if self.num_padding_imgs > 0 and len(images) > 0:
+            padding_img = np.zeros_like(images[0])
+            for _ in range(self.num_padding_imgs):
+                images.append(padding_img)
+                img_masks.append(False)
         inputs['images'] = images
         inputs['img_masks'] = np.array(img_masks)
         inputs['task_description'] = data.get('task_description', '')
@@ -327,6 +337,7 @@ class ProcessLiberoEvalInputs:
             imgs.append(get_libero_image(inputs, self.resize_size, img_key))
         replay_img = copy.deepcopy(imgs[0])
         images = list()
+        img_masks = list()
         if self.use_pil:
             for img in imgs:
                 image = Image.fromarray(img)
@@ -362,9 +373,12 @@ class ProcessLiberoEvalInputs:
                     image = Image.fromarray(image.numpy())
                     image = image.convert('RGB')
                 images.append(image)
+                img_masks.append(True)
         else:
             images = imgs
+            img_masks = [True] * len(imgs)
         inputs['pixel_values'] = images
+        inputs['img_masks'] = img_masks
         inputs['replay_img'] = replay_img
         if self.embodiment_id is not None:
             inputs['embodiment_ids'] = np.array(

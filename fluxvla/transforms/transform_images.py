@@ -55,6 +55,124 @@ class ResizeImages:
 
 
 @TRANSFORMS.register_module()
+class AugImage:
+    """Augment images with random transformations including
+    rotation, brightness/contrast adjustment, and random cropping.
+    This transform applies various augmentations to all images
+    in the 'images' dictionary of the input data.
+
+    Args:
+        rotation_range (float): Maximum rotation angle in degrees.
+            The image will be rotated by a random angle in
+            [-rotation_range, rotation_range]. Default: 15.0.
+        brightness_range (Tuple[float, float]): Range for brightness
+            adjustment as (min, max) multipliers. Default: (0.8, 1.2).
+        contrast_range (Tuple[float, float]): Range for contrast
+            adjustment as (min, max) multipliers. Default: (0.8, 1.2).
+        crop_scale (Tuple[float, float]): Range for random crop scale
+            as (min, max) fractions of original size. Default: (0.8, 1.0).
+        prob (float): Probability of applying each augmentation.
+            Default: 0.5.
+    """
+
+    def __init__(self,
+                 rotation_range: float = 15.0,
+                 brightness_range: Tuple[float, float] = (0.8, 1.2),
+                 contrast_range: Tuple[float, float] = (0.8, 1.2),
+                 crop_scale: Tuple[float, float] = (0.8, 1.0),
+                 prob: float = 0.5,
+                 *args,
+                 **kwargs):
+        self.rotation_range = rotation_range
+        self.brightness_range = brightness_range
+        self.contrast_range = contrast_range
+        self.crop_scale = crop_scale
+        self.prob = prob
+
+    def _random_rotate(self, image: np.ndarray) -> np.ndarray:
+        """Apply random rotation to the image."""
+        if np.random.random() > self.prob:
+            return image
+        # image shape: (C, H, W)
+        h, w = image.shape[1], image.shape[2]
+        angle = np.random.uniform(-self.rotation_range, self.rotation_range)
+        center = (w / 2, h / 2)
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        # Transpose to (H, W, C) for cv2
+        img_hwc = image.transpose(1, 2, 0)
+        rotated = cv2.warpAffine(
+            img_hwc, rotation_matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        return rotated.transpose(2, 0, 1)
+
+    def _random_brightness(self, image: np.ndarray) -> np.ndarray:
+        """Apply random brightness adjustment to the image."""
+        if np.random.random() > self.prob:
+            return image
+        factor = np.random.uniform(self.brightness_range[0],
+                                   self.brightness_range[1])
+        return np.clip(image * factor, 0, 255).astype(image.dtype)
+
+    def _random_contrast(self, image: np.ndarray) -> np.ndarray:
+        """Apply random contrast adjustment to the image."""
+        if np.random.random() > self.prob:
+            return image
+        factor = np.random.uniform(self.contrast_range[0],
+                                   self.contrast_range[1])
+        mean = np.mean(image, axis=(1, 2), keepdims=True)
+        return np.clip((image - mean) * factor + mean, 0,
+                       255).astype(image.dtype)
+
+    def _random_crop(self, image: np.ndarray) -> np.ndarray:
+        """Apply random crop and resize back to original size."""
+        if np.random.random() > self.prob:
+            return image
+        # image shape: (C, H, W)
+        c, h, w = image.shape
+        scale = np.random.uniform(self.crop_scale[0], self.crop_scale[1])
+        new_h, new_w = int(h * scale), int(w * scale)
+
+        # Random crop position
+        top = np.random.randint(0, h - new_h + 1)
+        left = np.random.randint(0, w - new_w + 1)
+
+        # Crop
+        cropped = image[:, top:top + new_h, left:left + new_w]
+
+        # Resize back to original size
+        img_hwc = cropped.transpose(1, 2, 0)
+        resized = cv2.resize(img_hwc, (w, h), interpolation=cv2.INTER_LINEAR)
+        return resized.transpose(2, 0, 1)
+
+    def __call__(self, data: dict):
+        assert 'images' in data, "Input data must contain 'images' key"
+        if isinstance(data['images'], np.ndarray):
+            if data['images'].ndim == 3:
+                images = data['images'].reshape(-1, 3,
+                                                data['images'].shape[-2],
+                                                data['images'].shape[-1])
+            else:
+                images = data['images']
+        else:
+            images = data['images']
+
+        augmented_images = list()
+        for image in images:
+            aug_image = image.copy()
+            aug_image = self._random_rotate(aug_image)
+            aug_image = self._random_brightness(aug_image)
+            aug_image = self._random_contrast(aug_image)
+            aug_image = self._random_crop(aug_image)
+            augmented_images.append(aug_image)
+
+        augmented_images = np.stack(augmented_images, axis=0)
+        # Reshape back to original shape if needed
+        if data['images'].ndim == 3:
+            augmented_images = augmented_images.reshape(data['images'].shape)
+        data['images'] = augmented_images
+        return data
+
+
+@TRANSFORMS.register_module()
 class NormalizeImages:
     """Normalize images in the dataset using specified
     means and standard deviations. This transform normalizes

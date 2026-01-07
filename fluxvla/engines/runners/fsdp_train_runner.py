@@ -93,7 +93,7 @@ class FSDPTrainRunner(BaseTrainRunner):
                  enable_mixed_precision_training: bool = True,
                  reduce_in_full_precision: bool = True,
                  mixed_precision_dtype: str = 'bf16',
-                 sharding_strategy: str = 'full-shard',
+                 sharding_strategy: str = 'hybrid-shard',
                  change_key_name: bool = False,
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
@@ -115,6 +115,8 @@ class FSDPTrainRunner(BaseTrainRunner):
         if self.sharding_strategy == 'shard-grad-op':
             self.fsdp_sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
         elif self.sharding_strategy == 'full-shard':
+            self.fsdp_sharding_strategy = ShardingStrategy.FULL_SHARD
+        elif self.sharding_strategy == 'hybrid-shard':
             self.fsdp_sharding_strategy = ShardingStrategy.HYBRID_SHARD
         else:
             raise ValueError(

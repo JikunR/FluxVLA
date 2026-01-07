@@ -110,11 +110,11 @@ train_dataloader = dict(
             'action': ['action']
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
-        statistic_name='libero_10_no_noops',
+        statistic_name='libero_90_no_noops',
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
+            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_90_no_noops_lerobotv2.1',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -155,7 +155,7 @@ train_dataloader = dict(
             action_window_size=10,
             action_key='action',
             use_delta=False,
-            statistic_name='libero_10_no_noops',
+            statistic_name='libero_90_no_noops',
             window_start_idx=0)))
 
 runner = dict(
@@ -188,12 +188,11 @@ runner = dict(
     enable_gradient_checkpointing=True,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
-    sharding_strategy='full-shard',
     change_key_name=False)
 
 eval = dict(
     type='LiberoEvalRunner',
-    task_suite_name='libero_10',
+    task_suite_name='libero_90',
     model_family='pi0',
     eval_chunk_size=10,
     resize_size=224,

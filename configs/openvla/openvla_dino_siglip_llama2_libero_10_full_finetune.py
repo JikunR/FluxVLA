@@ -126,44 +126,43 @@ runner = dict(
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
-    sharding_strategy='full-shard')
-
-eval = dict(
-    type='LiberoEvalRunner',
-    model_family='openvla',
-    task_suite_name='libero_10',
-    dataset=dict(
-        type='LiberoParquetEvalDataset',
-        transforms=[
-            dict(
-                type='ProcessLiberoEvalInputs',
-                img_keys=['agentview_image', 'agentview_image'],
-            ),
-            dict(
-                type='TransformImage',
-                image_resize_strategy='resize-naive',
-                input_sizes=[[3, 224, 224], [3, 224, 224]],
-                means=[[123.515625, 116.04492188, 103.59375], [128, 128, 128]],
-                stds=[[58.27148438, 57.02636719, 57.27539062], [128, 128,
-                                                                128]],
-            ),
-            dict(
-                type='LiberoPromptFromInputs',
-                prompt_suffix=' ',
-                max_len=None,
-                tokenizer=dict(
-                    type='PretrainedTokenizer',
-                    model_path=  # noqa: E251
-                    'openvla/openvla-7b-finetuned-libero-10',  # noqa: E501
-                    # special_tokens={'pad_token': '<PAD>'}
-                )),
-        ]),
-    denormalize_action=dict(
-        type='DenormalizeLiberoAction',
-        norm_type='quantile',
-        action_norm_mask=[True, True, True, True, True, True, False],
-    ),
-    resize_size=224,
-    num_trials_per_task=50,
-    num_steps_wait=10,
-    seed=7)
+    eval=dict(
+        type='LiberoEvalRunner',
+        model_family='openvla',
+        task_suite_name='libero_10',
+        dataset=dict(
+            type='LiberoParquetEvalDataset',
+            transforms=[
+                dict(
+                    type='ProcessLiberoEvalInputs',
+                    img_keys=['agentview_image', 'agentview_image'],
+                ),
+                dict(
+                    type='TransformImage',
+                    image_resize_strategy='resize-naive',
+                    input_sizes=[[3, 224, 224], [3, 224, 224]],
+                    means=[[123.515625, 116.04492188, 103.59375],
+                           [128, 128, 128]],
+                    stds=[[58.27148438, 57.02636719, 57.27539062],
+                          [128, 128, 128]],
+                ),
+                dict(
+                    type='LiberoPromptFromInputs',
+                    prompt_suffix=' ',
+                    max_len=None,
+                    tokenizer=dict(
+                        type='PretrainedTokenizer',
+                        model_path=  # noqa: E251
+                        'openvla/openvla-7b-finetuned-libero-10',  # noqa: E501
+                        # special_tokens={'pad_token': '<PAD>'}
+                    )),
+            ]),
+        denormalize_action=dict(
+            type='DenormalizeLiberoAction',
+            norm_type='quantile',
+            action_norm_mask=[True, True, True, True, True, True, False],
+        ),
+        resize_size=224,
+        num_trials_per_task=50,
+        num_steps_wait=10,
+        seed=7))

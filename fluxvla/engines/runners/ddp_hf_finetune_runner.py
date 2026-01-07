@@ -190,11 +190,17 @@ class DDPHFFinetuneRunner:
 
         # Setup LoRA if enabled
         if self.cfg.model.use_lora:
+            # Use configured lora_alpha, default to lora_rank if not specified
+            lora_alpha = getattr(self.cfg.model, 'lora_alpha',
+                                 self.cfg.model.lora_rank)
+            # Get modules_to_save for full fine-tuning of specific modules
+            modules_to_save = getattr(self.cfg.model, 'modules_to_save', None)
             lora_config = LoraConfig(
                 r=self.cfg.model.lora_rank,
-                lora_alpha=min(self.cfg.model.lora_rank, 16),
+                lora_alpha=lora_alpha,
                 lora_dropout=self.cfg.model.lora_dropout,
                 target_modules=self.cfg.model.lora_target_modules,
+                modules_to_save=modules_to_save,
                 init_lora_weights='gaussian',
             )
             self.vla = get_peft_model(self.vla, lora_config)

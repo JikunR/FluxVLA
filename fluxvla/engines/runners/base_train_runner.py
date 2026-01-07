@@ -737,13 +737,6 @@ class BaseTrainRunner(ABC):
         self.metric.commit(loss=loss)
         loss.backward()
 
-        # Commit action metrics if available
-        if 'action_accuracy' in output and 'action_l1_loss' in output:
-            self.metric.commit(
-                action_accuracy=output['action_accuracy'],
-                l1_loss=output['action_l1_loss'],
-                update_step_time=True)
-
         # Commit per-dataset metrics
         if overwatch.is_rank_zero() and all(k in output for k in [
                 'action_accuracy_ds', 'action_l1_loss_ds', 'ds_names'
