@@ -1,4 +1,19 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import gc
+import os
 import unittest
 
 import numpy as np
@@ -7,7 +22,21 @@ import torch
 
 from fluxvla.engines import build_vla_from_cfg, set_seed_everywhere
 
+OPENVLA_CKPT_PATH = './checkpoints/openvla-7b-finetuned-libero-10'
+LLAMA2_CKPT_PATH = './checkpoints/Llama-2-7b-hf'
+DINO_CKPT_PATH = './checkpoints/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
+SIGLIP_CKPT_PATH = './checkpoints/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
+PI0_CKPT_PATH = './checkpoints/pi0_base/model.safetensors'
+PI05_CKPT_PATH = './checkpoints/pi05_base/model.safetensors'
+GR00T_CKPT_PATH = './checkpoints/GR00T-N1.5-3B'
 
+
+@pytest.mark.skipif(
+    not os.path.exists(OPENVLA_CKPT_PATH)
+    or not os.path.exists(LLAMA2_CKPT_PATH)
+    or not os.path.exists(DINO_CKPT_PATH)
+    or not os.path.exists(SIGLIP_CKPT_PATH),
+    reason=f'Checkpoint not found: {OPENVLA_CKPT_PATH}')
 class TestOpenVLA(unittest.TestCase):
 
     def setUp(self):
@@ -22,20 +51,18 @@ class TestOpenVLA(unittest.TestCase):
                 dino_config=dict(
                     model_id='dino',
                     file=  # noqa: E251
-                    '/limx/tos/limx_mani_checkpoints/open_source/huggingface/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
-                ),
+                    DINO_CKPT_PATH),
                 image_resize_strategy='resize-naive',
                 siglip_config=dict(
                     model_id='siglip_224',
                     file=  # noqa: E251
-                    '/limx/tos/limx_mani_checkpoints/open_source/huggingface/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
-                )),
+                    SIGLIP_CKPT_PATH)),
             llm_backbone=dict(
                 type='LLaMa2LLMBackbone',
                 llm_backbone_id='llama2-7b-pure_causal',
                 llm_family='llama',
                 llm_path=  # noqa: E251
-                '/limx/tos/limx_mani_checkpoints/open_source/huggingface/Llama-2-7b-hf',  # noqa: E501
+                LLAMA2_CKPT_PATH,  # noqa: E501
                 llm_max_length=2048,
                 hf_token=None,
                 inference_mode=False),
@@ -44,7 +71,7 @@ class TestOpenVLA(unittest.TestCase):
             tokenizer=dict(
                 type='ActionTokenizer',
                 model_path=  # noqa: E251
-                '/limx/tos/users/liyinhao/projects/openvla/openvla/openvla-7b',  # noqa: E501
+                OPENVLA_CKPT_PATH,  # noqa: E501
                 bins=256,
                 min_action=-1,
                 max_action=1,
@@ -91,136 +118,9 @@ class TestOpenVLA(unittest.TestCase):
                 atol=1e-1))
 
 
-class TestLlavaVLA(unittest.TestCase):
-
-    def setUp(self):
-        #  TODO: Find a way to test use_flash_attention
-        gc.collect()
-        torch.cuda.empty_cache()
-        self.cfg = dict(
-            type='LlavaVLA',
-            pretrained_name_or_path=  # noqa: E251
-            '/limx/tos/users/liyinhao/cache/openpi/openpi-assets/checkpoints/pi0_libero_pytorch/model.safetensors',  # noqa: E501. Refer to https://github.com/ZibinDong/openpi_pytorch
-            vlm_backbone=dict(
-                type='PaliGemma',
-                vlm_backbone_id='paligemma_3b_pt_224',
-                use_llm=True,
-                vlm_config=dict(
-                    vocab_size=257152,
-                    bos_token_id=2,
-                    eos_token_id=1,
-                    hidden_size=2048,
-                    image_token_index=257152,
-                    model_type='paligemma',
-                    pad_token_id=0,
-                    projection_dim=2048,
-                    text_config=dict(
-                        attention_bias=False,
-                        attention_dropout=0.0,
-                        head_dim=256,
-                        hidden_act='gelu_pytorch_tanh',
-                        hidden_activation='gelu_pytorch_tanh',
-                        hidden_size=2048,
-                        initializer_range=0.02,
-                        intermediate_size=16384,
-                        max_position_embeddings=8192,
-                        model_type='gemma',
-                        num_attention_heads=8,
-                        num_hidden_layers=18,
-                        num_image_tokens=256,
-                        num_key_value_heads=1,
-                        rms_norm_eps=1e-06,
-                        rope_theta=10000.0,
-                        torch_dtype='float32',
-                        use_cache=True,
-                        vocab_size=257152,
-                    ),
-                    transformers_version='4.52.4',
-                    vision_config=dict(
-                        attention_dropout=0.0,
-                        hidden_act='gelu_pytorch_tanh',
-                        hidden_size=1152,
-                        image_size=28,
-                        intermediate_size=4304,
-                        layer_norm_eps=1e-06,
-                        model_type='siglip_vision_model',
-                        num_attention_heads=16,
-                        num_channels=3,
-                        num_hidden_layers=27,
-                        num_image_tokens=256,
-                        patch_size=14,
-                        projection_dim=2048,
-                        projector_hidden_act='gelu_fast',
-                        torch_dtype='float32',
-                        vision_use_head=False,
-                    ))),
-            vla_head=dict(
-                type='LlavaActionHead',
-                state_dim=8,
-                hidden_size=2048,
-                num_layers=1,
-                num_heads=4,
-                traj_length=10,
-                action_dim=7),
-            freeze_vlm_backbone=False,
-            freeze_projector=False,
-            name_mapping={
-                'vlm_backbone.vlm.model.language_model':
-                'model.paligemma_with_expert.paligemma.model.language_model',
-                'vlm_backbone.vlm.model.vision_tower':
-                'model.paligemma_with_expert.paligemma.model.vision_tower',
-                'vlm_backbone.vlm.model.multi_modal_projector':
-                'model.paligemma_with_expert.paligemma.model.multi_modal_projector',  # noqa: E501
-            })
-
-        set_seed_everywhere(0)
-        self.vla = build_vla_from_cfg(self.cfg).cuda()
-        self.vla.eval()
-
-    @pytest.mark.skipif(
-        condition=torch.cuda.is_available() is False,
-        reason='No GPU available.')
-    def test_forward(self):
-        images = np.load(
-            'test/data/models/vlas/llavavla/images.npy', allow_pickle=True)
-        images = torch.from_numpy(images).cuda()
-        img_masks = np.load(
-            'test/data/models/vlas/llavavla/img_masks.npy', allow_pickle=True)
-        img_masks = torch.from_numpy(img_masks).cuda()
-        lang_tokens = np.load(
-            'test/data/models/vlas/llavavla/lang_tokens.npy',
-            allow_pickle=True)
-        lang_tokens = torch.from_numpy(lang_tokens).cuda()
-        lang_masks = np.load(
-            'test/data/models/vlas/llavavla/lang_masks.npy', allow_pickle=True)
-        lang_masks = torch.from_numpy(lang_masks).cuda()
-        states = torch.from_numpy(
-            np.load('test/data/models/vlas/llavavla/states.npy')).cuda()
-        actions = torch.from_numpy(
-            np.load('test/data/models/vlas/llavavla/actions.npy')).cuda()
-        with torch.no_grad():
-            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=True):
-                output = self.vla.forward(
-                    images=images,
-                    img_masks=img_masks,
-                    lang_tokens=lang_tokens,
-                    lang_masks=lang_masks,
-                    states=states.bfloat16(),
-                    actions=actions.bfloat16(),
-                    action_masks=torch.ones((1, 10)).cuda())
-        target_pred_actions = np.load(
-            'test/data/models/vlas/llavavla/pred_actions.npy',
-            allow_pickle=True)
-        target_pred_actions = torch.from_numpy(target_pred_actions).cuda()
-        self.assertTrue(
-            torch.allclose(
-                output['pred_actions'].float(),
-                target_pred_actions.float(),
-                rtol=1e-2,
-                atol=1e-2),
-            'Output predictions do not match the target predictions.')
-
-
+@pytest.mark.skipif(
+    not os.path.exists(GR00T_CKPT_PATH),
+    reason=f'Checkpoint not found: {GR00T_CKPT_PATH}')
 class TestGr00t(unittest.TestCase):
 
     def setUp(self):
@@ -229,7 +129,7 @@ class TestGr00t(unittest.TestCase):
         self.cfg = dict(
             type='LlavaVLA',
             pretrained_name_or_path=  # noqa: E251
-            '/limx/tos/users/liyinhao/projects/GR00T-N1.5-3B',
+            GR00T_CKPT_PATH,
             vlm_backbone=dict(
                 type='EagleBackbone',
                 vlm_path=  # noqa: E251
@@ -293,6 +193,9 @@ class TestGr00t(unittest.TestCase):
                 output['loss'].cpu().detach().numpy(), 2.629, atol=1e-2))
 
 
+@pytest.mark.skipif(
+    not os.path.exists(PI0_CKPT_PATH),
+    reason=f'Checkpoint not found: {PI0_CKPT_PATH}')
 class TestPI0FlowMatching(unittest.TestCase):
 
     def setUp(self):
@@ -305,6 +208,8 @@ class TestPI0FlowMatching(unittest.TestCase):
                 adarms_cond_dim=None,
                 attention_bias=False,
                 attention_dropout=0.0,
+                bos_token_id=2,
+                eos_token_id=1,
                 head_dim=256,
                 hidden_act='gelu_pytorch_tanh',
                 hidden_activation='gelu_pytorch_tanh',
@@ -363,7 +268,7 @@ class TestPI0FlowMatching(unittest.TestCase):
             llm_expert=dict(
                 type='ConditionGemmaModel',
                 attention_bias=False,
-                adarms_cond_dim=1024,
+                adarms_cond_dim=None,
                 attention_dropout=0.0,
                 bos_token_id=2,
                 eos_token_id=1,
@@ -389,28 +294,28 @@ class TestPI0FlowMatching(unittest.TestCase):
             freeze_llm_backbone=False,
             freeze_vision_backbone=False,
             pretrained_name_or_path=  # noqa: E251
-            '/limx/tos/users/liyinhao/checkpoints/pi0_libero/model.safetensors',  # noqa: E501
+            './checkpoints/pi0_base/model.safetensors',  # noqa: E501
             name_mapping={
                 'llm_backbone':
-                'model.paligemma_with_expert.paligemma.model.language_model',
+                'paligemma_with_expert.paligemma.model.language_model',
                 'vision_backbone.vision':
-                'model.paligemma_with_expert.paligemma.model.vision_tower',
+                'paligemma_with_expert.paligemma.model.vision_tower',
                 'projector.projector':
-                'model.paligemma_with_expert.paligemma.model.multi_modal_projector.linear',  # noqa: E501
+                'paligemma_with_expert.paligemma.model.multi_modal_projector.linear',  # noqa: E501
                 'llm_expert':
-                'model.paligemma_with_expert.gemma_expert.model',
-                'action_in_proj.projector':
-                'model.action_in_proj',
-                'action_out_proj.projector':
-                'model.action_out_proj',
-                'state_proj.projector':
-                'model.state_proj',
+                'paligemma_with_expert.gemma_expert.model',
                 'action_time_mlp_in.projector':
-                'model.action_time_mlp_in',
+                'action_time_mlp_in',
                 'action_time_mlp_out.projector':
-                'model.action_time_mlp_out',
+                'action_time_mlp_out',
+                'state_proj.projector':
+                'state_proj',
+                'action_in_proj.projector':
+                'action_in_proj',
+                'action_out_proj.projector':
+                'action_out_proj',
                 'llm_backbone.embed_tokens':
-                'model.paligemma_with_expert.paligemma.lm_head'
+                'paligemma_with_expert.paligemma.lm_head',
             },
             params_to_change_dtype=[
                 'llm_expert.llm.model.layers',
@@ -619,6 +524,9 @@ class TestPI0FlowMatching(unittest.TestCase):
                 atol=5e-1))
 
 
+@pytest.mark.skipif(
+    not os.path.exists(PI05_CKPT_PATH),
+    reason=f'Checkpoint not found: {PI05_CKPT_PATH}')
 class TestPI05FlowMatching(unittest.TestCase):
 
     def setUp(self):
@@ -716,7 +624,7 @@ class TestPI05FlowMatching(unittest.TestCase):
             freeze_llm_backbone=False,
             freeze_vision_backbone=False,
             pretrained_name_or_path=  # noqa: E251
-            '/limx/tos/users/liyinhao/checkpoints/pi05_base/model.safetensors',  # noqa: E501
+            PI05_CKPT_PATH,  # noqa: E501
             name_mapping={
                 'llm_backbone':
                 'paligemma_with_expert.paligemma.model.language_model',

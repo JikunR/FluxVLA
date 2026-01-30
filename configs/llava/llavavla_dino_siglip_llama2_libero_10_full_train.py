@@ -1,3 +1,17 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=None,
@@ -7,20 +21,20 @@ model = dict(
         dino_config=dict(
             model_id='dino',
             file=  # noqa: E251
-            '/limx/tos/limx_mani_checkpoints/open_source/huggingface/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
+            './checkpoints/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
         ),
         image_resize_strategy='resize-naive',
         siglip_config=dict(
             model_id='siglip_224',
             file=  # noqa: E251
-            '/limx/tos/limx_mani_checkpoints/open_source/huggingface/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
+            './checkpoints/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
         )),
     llm_backbone=dict(
         type='LLaMa2LLMBackbone',
         llm_backbone_id='llama2-7b-pure',
         llm_family='llama',
         llm_path=  # noqa: E251
-        '/limx/tos/limx_mani_checkpoints/open_source/huggingface/Llama-2-7b-hf',  # noqa: E501
+        './checkpoints/Llama-2-7b-hf',  # noqa: E501
         llm_max_length=2048,
         hf_token=None,
         inference_mode=False),
@@ -129,7 +143,7 @@ train_dataloader = dict(
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
+            './datasets/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -194,8 +208,6 @@ runner = dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='constant',

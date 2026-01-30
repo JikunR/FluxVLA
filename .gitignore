@@ -53,5 +53,9 @@ out/
 work_dirs/
 work_dirs
 
+# Ignore checkpoints folder contents but keep the folder
+checkpoints/*
+!checkpoints/.gitkeep
+
 # Ignore vscode directories
 .vscode/

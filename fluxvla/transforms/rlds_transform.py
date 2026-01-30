@@ -1,3 +1,5 @@
+# Modified from https://github.com/openvla/openvla/blob/c8f03f48af692657d3060c19588038c7220e9af9/prismatic/vla/datasets/rlds/obs_transforms.py  # noqa: E501
+
 from typing import Any, Dict, List, Union
 
 import torch

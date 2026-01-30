@@ -1,3 +1,5 @@
+# Modified from https://github.com/openvla/openvla/blob/main/prismatic/training/metrics.py  # noqa: E501
+
 import os
 import time
 from collections import defaultdict, deque
@@ -67,8 +69,6 @@ class WeightsBiasesTracker:
         run_id: str,
         run_dir: str,
         hparams: Dict[str, Any],
-        project: str = 'fluxvla',
-        entity: str = None,
         group: str = 'align',
     ) -> None:
         """Initialize Weights & Biases Tracker.
@@ -79,15 +79,19 @@ class WeightsBiasesTracker:
             run_id (str): ID of the run.
             run_dir (str): Directory to save the run.
             hparams (Dict[str, Any]): parameters for the run.
-            project (str, optional): Name of the project. Defaults to "fluxvla".  # noqa: E501
-            entity (str, optional): Name of the entity. Defaults to None.
             group (str, optional): Name of the group . Defaults to "align".
+
+        Environment Variables:
+            WANDB_PROJECT: Name of the project. Defaults to "fluxvla".
+            WANDB_ENTITY: Name of the entity. Defaults to None.
         """
         self.run_id, self.run_dir, self.hparams = run_id, run_dir, hparams
 
-        # Get W&B-Specific Initialization Parameters
-        self.project, self.entity, self.group, self.wandb_dir = project, \
-            entity, group, self.run_dir
+        # Get W&B-Specific Initialization Parameters from environment
+        self.project = os.environ.get('WANDB_PROJECT', 'fluxvla')
+        self.entity = os.environ.get('WANDB_ENTITY', None)
+        self.group = group
+        self.wandb_dir = self.run_dir
 
         # Call W&B.init()
         self.initialize()
@@ -137,10 +141,6 @@ class VLAMetric:
         run_id (str): ID of the run.
         run_dir (str): Directory to save the run.
         hparams (Dict[str, Any]): Hyperparameters for the run.
-        wandb_project (str, optional): Name of the project.
-            Defaults to "fluxvla".
-        wandb_entity (Optional[str], optional): Name of the entity.
-            Defaults to "limx".
         grad_accumulation_steps (int, optional): Number of gradient
             accumulation steps. Defaults to 1.
         window_size (int, optional): Size of the window for smoothing.
@@ -149,6 +149,11 @@ class VLAMetric:
             Defaults to None.
         resume_epoch (Optional[int], optional): Epoch to resume from.
             Defaults to None.
+
+    Environment Variables:
+        WANDB_PROJECT: Name of the wandb project. Defaults to "fluxvla".
+        WANDB_ENTITY: Name of the wandb entity. Defaults to None.
+        WANDB_MODE: Mode for wandb (online/offline/disabled). Defaults to "online".  # noqa: E501
     """
 
     def __init__(
@@ -157,8 +162,6 @@ class VLAMetric:
         run_id: str,
         run_dir: str,
         hparams: Dict[str, Any],
-        wandb_project: str = 'fluxvla',
-        wandb_entity: Optional[str] = 'limx',
         grad_accumulation_steps: int = 1,
         window_size: int = 1,
         resume_step: Optional[int] = None,
@@ -175,12 +178,7 @@ class VLAMetric:
                 tracker = JSONLinesTracker(run_id, run_dir, hparams)
             elif tracker_type == 'wandb':
                 tracker = WeightsBiasesTracker(
-                    run_id,
-                    run_dir,
-                    hparams,
-                    project=wandb_project,
-                    entity=wandb_entity,
-                    group='vla-train')
+                    run_id, run_dir, hparams, group='vla-train')
             else:
                 raise ValueError(
                     f'Tracker with type `{tracker_type} is not supported!')

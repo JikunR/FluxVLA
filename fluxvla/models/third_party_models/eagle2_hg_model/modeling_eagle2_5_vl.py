@@ -4,6 +4,11 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 
+#
+# Source: https://github.com/NVIDIA/Isaac-GR00T
+# Branch: n1.5-release
+# Path: gr00t/model/backbone/eagle2_hg_model/modeling_eagle2_5_vl.py
+
 import inspect
 from typing import List, Optional, Tuple, Union
 

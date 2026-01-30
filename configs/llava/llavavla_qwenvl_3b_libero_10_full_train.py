@@ -1,3 +1,17 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=None,
@@ -5,7 +19,7 @@ model = dict(
         type='QWen2_5VL',
         vlm_backbone_id='qwen2_5_3b_vl_pt_224',
         vlm_path=  # noqa: E251
-        '/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-VL-3B-Instruct',  # noqa: E501
+        './checkpoints/Qwen2.5-VL-3B-Instruct',  # noqa: E501
         vlm_config=dict(
             type='Qwen2_5_VLForConditionalGeneration',
             attention_dropout=0.0,
@@ -153,7 +167,7 @@ train_dataloader = dict(
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_10_no_noops_lerobotv2.1',  # noqa: E501
+            './datasets/libero_10_no_noops_lerobotv2.1',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -220,8 +234,6 @@ runner = dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='constant',

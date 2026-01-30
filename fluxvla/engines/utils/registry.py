@@ -1,4 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+#
+# Source: https://github.com/open-mmlab/mmengine
+# Branch: main
+# Path: mmengine/registry/registry.py
 import inspect
 import logging
 import sys

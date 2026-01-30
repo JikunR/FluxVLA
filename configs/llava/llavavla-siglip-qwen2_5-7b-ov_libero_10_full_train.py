@@ -1,25 +1,32 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=None,
     vision_backbone=dict(
-        type='DinoSigLIPViTBackbone',
-        vision_backbone_id='dinosiglip-vit-so-224px',
-        dino_config=dict(
-            model_id='dino',
-            file=  # noqa: E251
-            '/limx/tos/limx_mani_checkpoints/open_source/huggingface/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
-        ),
-        image_resize_strategy='resize-naive',
-        siglip_config=dict(
-            model_id='siglip_224',
-            file=  # noqa: E251
-            '/limx/tos/limx_mani_checkpoints/open_source/huggingface/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
+        type='SigLIPViTBackbone',
+        vision_backbone_id='siglip_224',
+        pretrained_cfg=dict(
+            pretrained_model_name_or_path=  # noqa: E251
+            './checkpoints/siglip2-base-patch16-224'  # noqa: E501
         )),
     llm_backbone=dict(
         type='Qwen2LLMBackbone',
         llm_backbone_id='qwen2_5-7b',
         llm_family='qwen2',
-        llm_path='/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-3B',
+        llm_path='./checkpoints/Qwen2.5-7B',
         pad_token_id=151643,
         llm_config={
             'architectures': ['Qwen2ForCausalLM'],
@@ -27,94 +34,37 @@ model = dict(
             'bos_token_id': 151643,
             'eos_token_id': 151643,
             'hidden_act': 'silu',
-            'hidden_size': 2048,
+            'hidden_size': 3584,
             'initializer_range': 0.02,
-            'intermediate_size': 11008,
-            'max_position_embeddings': 32768,
-            'max_window_layers': 36,
+            'intermediate_size': 18944,
+            'max_position_embeddings': 131072,
+            'max_window_layers': 28,
             'model_type': 'qwen2',
-            'num_attention_heads': 16,
-            'num_hidden_layers': 36,
-            'num_key_value_heads': 2,
+            'num_attention_heads': 28,
+            'num_hidden_layers': 28,
+            'num_key_value_heads': 4,
             'rms_norm_eps': 1e-06,
             'rope_theta': 1000000.0,
-            'sliding_window': 32768,
-            'tie_word_embeddings': True,
+            'sliding_window': 131072,
+            'tie_word_embeddings': False,
             'torch_dtype': 'bfloat16',
             'transformers_version': '4.40.1',
             'use_cache': True,
             'use_mrope': False,
             'use_sliding_window': False,
-            'vocab_size': 151936
+            'vocab_size': 152064,
+            'output_hidden_states': True,
         }),
     vla_head=dict(
         type='LlavaActionHead',
         state_dim=8,
-        hidden_size=2048,
+        hidden_size=3584,
         num_layers=1,
         num_heads=4,
         traj_length=10,
         action_dim=7),
     projector=dict(
-        type='FusedMLPProjector', fused_vision_dim=2176, llm_dim=2048),
-    freeze_vision_backbone=False,
-    freeze_llm_backbone=False,
-    freeze_projector=False)
-
-inference_model = dict(
-    type='LlavaVLA',
-    pretrained_name_or_path=None,
-    vision_backbone=dict(
-        type='DinoSigLIPViTBackbone',
-        pretrained=False,
-        vision_backbone_id='dinosiglip-vit-so-224px',
-        dino_config=dict(model_id='dino', ),
-        image_resize_strategy='resize-naive',
-        siglip_config=dict(model_id='siglip_224')),
-    llm_backbone=dict(
-        type='Qwen2LLMBackbone',
-        llm_backbone_id='qwen2_5-7b',
-        llm_family='qwen2',
-        llm_path=None,
-        llm_max_length=2048,
-        hf_token=None,
-        pad_token_id=151643,
-        llm_config={
-            'architectures': ['Qwen2ForCausalLM'],
-            'attention_dropout': 0.0,
-            'bos_token_id': 151643,
-            'eos_token_id': 151643,
-            'hidden_act': 'silu',
-            'hidden_size': 2048,
-            'initializer_range': 0.02,
-            'intermediate_size': 11008,
-            'max_position_embeddings': 32768,
-            'max_window_layers': 36,
-            'model_type': 'qwen2',
-            'num_attention_heads': 16,
-            'num_hidden_layers': 36,
-            'num_key_value_heads': 2,
-            'rms_norm_eps': 1e-06,
-            'rope_theta': 1000000.0,
-            'sliding_window': 32768,
-            'tie_word_embeddings': True,
-            'torch_dtype': 'bfloat16',
-            'transformers_version': '4.40.1',
-            'use_cache': True,
-            'use_mrope': False,
-            'use_sliding_window': False,
-            'vocab_size': 151936
-        }),
-    vla_head=dict(
-        type='LlavaActionHead',
-        state_dim=8,
-        hidden_size=2048,
-        num_layers=1,
-        num_heads=4,
-        traj_length=10,
-        action_dim=7),
-    projector=dict(
-        type='FusedMLPProjector', fused_vision_dim=2176, llm_dim=2048),
+        type='FusedMLPProjector', fused_vision_dim=768, llm_dim=3584),
     freeze_vision_backbone=False,
     freeze_llm_backbone=False,
     freeze_projector=False)
@@ -210,7 +160,7 @@ train_dataloader = dict(
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
+            './datasets/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -232,7 +182,7 @@ train_dataloader = dict(
                     tokenizer=dict(
                         type='PretrainedTokenizer',
                         model_path=  # noqa: E251
-                        '/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-3B',  # noqa: E501
+                        'checkpoints/Qwen2.5-7B',  # noqa: E501
                         # special_tokens={'pad_token': '<PAD>'}
                     )),
                 dict(type='ResizeImages', height=224, width=224),
@@ -274,8 +224,6 @@ runner = dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='constant',
@@ -315,7 +263,7 @@ eval = dict(
                 tokenizer=dict(
                     type='PretrainedTokenizer',
                     model_path=  # noqa: E251
-                    '/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-3B',  # noqa: E501
+                    'checkpoints/Qwen2.5-7B',  # noqa: E501
                     # special_tokens={'pad_token': '<PAD>'}
                 )),
             dict(
@@ -326,34 +274,6 @@ eval = dict(
                 gripper_key='robot0_gripper_qpos',
                 out_key='states'),
         ]),
-    denormalize_action=dict(
-        type='DenormalizeLiberoAction',
-        norm_type='quantile',
-    ),
-)
-
-inference = dict(
-    type='LiberoInferenceRunner',
-    task_suite_name='libero_10',
-    model_family='pi0',
-    eval_chunk_size=10,
-    resize_size=224,
-    num_trials_per_task=50,
-    num_steps_wait=10,
-    seed=7,
-    dataset=dict(
-        type='LiberoEvalDataset',
-        img_transform=dict(
-            type='TransformImage',
-            image_resize_strategy='resize-naive',
-            input_sizes=[[3, 224, 224], [3, 224, 224]],
-            means=[[0.484375, 0.455078125, 0.40625], [0.5, 0.5, 0.5]],
-            stds=[[0.228515625, 0.2236328125, 0.224609375], [0.5, 0.5, 0.5]],
-        ),
-        img_keys=['agentview_image', 'agentview_image'],
-        tokenizer=dict(type='PretrainedTokenizer', model_path=None),
-        pad_token_id=151643,
-    ),
     denormalize_action=dict(
         type='DenormalizeLiberoAction',
         norm_type='quantile',

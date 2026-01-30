@@ -1,3 +1,17 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='PI05FlowMatching',
     llm_backbone=dict(
@@ -86,7 +100,7 @@ model = dict(
     freeze_llm_backbone=False,
     freeze_vision_backbone=False,
     pretrained_name_or_path=  # noqa: E251
-    '/limx/tos/users/liyinhao/checkpoints/pi05_libero/model.pth',  # noqa: E501
+    './checkpoints/pi05_libero/model.safetensors',  # noqa: E501
     name_mapping={
         'llm_backbone': 'paligemma_with_expert.paligemma.model.language_model',
         'vision_backbone.vision':
@@ -98,6 +112,7 @@ model = dict(
         'time_mlp_out.projector': 'time_mlp_out',
         'action_in_proj.projector': 'action_in_proj',
         'action_out_proj.projector': 'action_out_proj',
+        'llm_backbone.embed_tokens': 'paligemma_with_expert.paligemma.lm_head',
     })
 
 train_dataloader = dict(
@@ -114,7 +129,7 @@ train_dataloader = dict(
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_object_no_noops_lerobotv2.1',  # noqa: E501
+            './datasets/libero_object_no_noops_lerobotv2.1',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -179,8 +194,6 @@ runner = dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='linear-warmup+cosine-decay',

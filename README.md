@@ -1,5 +1,17 @@
 # fluxvla
 
+<p align="center">
+  <img src="assets/fluxvla.png" alt="FluxVLA" width="600">
+</p>
+
+A Unified, Modular, and Deployable VLA Codebase.
+
+## Framework
+
+<p align="center">
+  <img src="assets/framework.png" alt="Framework Architecture" width="800">
+</p>
+
 ## Installation
 
 ### Install pytorch
@@ -49,9 +61,95 @@ pip install -r requirements.txt
 python setup.py develop
 ```
 
-To support the evaluation of Libero on devices without ray tracing (such as the A100, etc.), please follow the guidelines outlined in the [Eval on A100](https://cwjgfm21di.feishu.cn/wiki/GGRUwx978isixUkNFQccidZWnJe?from=from_copylink) specification.
+### Online Evaluation Environment Setup
+
+To evaluate LIBERO on devices without ray tracing support (such as A100), please refer to [EGL Device GPU Rendering Configuration](https://github.com/google-deepmind/mujoco/issues/572#issuecomment-2419965230).
+
+### Install Dependencies
+
+```bash
+export MUJOCO_GL=egl
+sudo apt install libegl-dev libgl1-mesa-dev libx11-dev libglew-dev libosmesa6-dev
+```
+
+#### Environment Check
+
+Verify that `/proc/1/environ` contains the following environment variables:
+
+- `NVIDIA_DRIVER_CAPABILITIES=all`
+- `NVARCH=x86_64`
+- `NVIDIA_REQUIRE_CUDA=cuda>=12.4`
+- `brand=tesla` and `driver>=470`
+
+#### Create EGL Configuration File
+
+Create the file `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` with the following content:
+
+```json
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "libEGL_nvidia.so.0"
+    }
+}
+```
+
+### Setup pre-commit hooks (Optional but Recommended)
+
+To ensure code quality and consistency, especially for C++/CUDA code, install pre-commit hooks:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+This will automatically check and format your code before each commit.
+
+### Configure Weights & Biases (wandb)
+
+[Weights & Biases](https://wandb.ai/) is used for experiment tracking and visualization. To configure wandb:
+
+1. Install wandb (already included in requirements.txt):
+
+```bash
+pip install wandb
+```
+
+2. Login to your wandb account:
+
+```bash
+wandb login
+```
+
+3. Set environment variables:
+
+```bash
+export WANDB_PROJECT=fluxvla        # Project name (default: fluxvla)
+export WANDB_ENTITY=your-team-name  # Team or username (default: None)
+export WANDB_MODE=online            # online, offline, or disabled (default: online)
+```
+
+4. To disable wandb logging during training, set:
+
+```bash
+export WANDB_MODE=disabled
+```
+
+Note: All wandb configuration is read from environment variables. There is no need to configure wandb in the config files.
 
 ## Data Preparation
+
+### Directly using our prepared data
+
+Download the required prepared datasets and place them in the `./datasets` folder. Only download the datasets you need based on your configuration.
+
+| Dataset              | Download Link                                                                                                                    |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| libero-object        | [Aiming1998/libero_object_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_object_no_noops_lerobotv2.1)   |
+| libero-spatial       | [Aiming1998/libero_spatial_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_spatial_no_noops_lerobotv2.1) |
+| libero-10            | [Aiming1998/libero_10_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_10_no_noops_lerobotv2.1)           |
+| libero-goal          | [Aiming1998/libero_goal_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_goal_no_noops_lerobotv2.1)       |
+| modified_libero_rlds | [openvla/modified_libero_rlds](https://huggingface.co/datasets/openvla/modified_libero_rlds)                                     |
 
 To train models using fluxvla on private datasets, organize the datasets in the following format.
 
@@ -82,6 +180,45 @@ To train models using fluxvla on private datasets, organize the datasets in the 
 │   └── ... (more chunks)
 │   └── chunk00N
 ```
+
+## Checkpoint Preparation
+
+Download the required pretrained checkpoints and place them in the `./checkpoints` folder. Only download the checkpoints you need based on your configuration.
+
+### VLA Models
+
+| Model       | Size | Download Link                                                                                           |
+| ----------- | ---- | ------------------------------------------------------------------------------------------------------- |
+| GR00T N1.5  | 3B   | [nvidia/GR00T-N1.5-3B](https://huggingface.co/nvidia/GR00T-N1.5-3B/tree/main)                           |
+| OpenVLA     | 7B   | [openvla/openvla-7b-finetuned-libero-10](https://huggingface.co/openvla/openvla-7b-finetuned-libero-10) |
+| PI0_base    | 3B   | [yinchimaoliang/pi0_base](https://huggingface.co/yinchimaoliang/pi0_base)                               |
+| PI05_base   | 3B   | [yinchimaoliang/pi05_base](https://huggingface.co/yinchimaoliang/pi05_base)                             |
+| PI05_libero | 3B   | [yinchimaoliang/pi05_libero](https://huggingface.co/yinchimaoliang/pi05_libero)                         |
+
+### Vision-Language Models (VLM)
+
+| Model      | Size | Download Link                                                                     |
+| ---------- | ---- | --------------------------------------------------------------------------------- |
+| Qwen2.5-VL | 3B   | [Qwen/Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) |
+
+### Large Language Models (LLM)
+
+| Model    | Size | Download Link                                                                         |
+| -------- | ---- | ------------------------------------------------------------------------------------- |
+| Qwen 2.5 | 3B   | [Qwen/Qwen2.5-3B](https://huggingface.co/Qwen/Qwen2.5-3B)                             |
+| Qwen 2.5 | 7B   | [Qwen/Qwen2.5-7B](https://huggingface.co/Qwen/Qwen2.5-7B)                             |
+| Llama 2  | 7B   | [meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/main) |
+
+### Vision Backbones
+
+| Model               | Download Link                                                                                                   |
+| ------------------- | --------------------------------------------------------------------------------------------------------------- |
+| ViT-Large (DINOv2)  | [timm/vit_large_patch14_reg4_dinov2.lvd142m](https://huggingface.co/timm/vit_large_patch14_reg4_dinov2.lvd142m) |
+| ViT-SO400M (SigLIP) | [timm/ViT-SO400M-14-SigLIP](https://huggingface.co/timm/ViT-SO400M-14-SigLIP)                                   |
+| SigLIP2             | [google/siglip2-base-patch16-224](https://huggingface.co/google/siglip2-base-patch16-224)                       |
+| paligemma           | [google/paligemma-3b-pt-224](https://huggingface.co/google/paligemma-3b-pt-224)                                 |
+
+> **Tip**: Use `huggingface-cli download <model-name> --local-dir ./checkpoints/<model-name>` for faster downloads.
 
 ## Features
 
@@ -190,7 +327,7 @@ python scripts/inference_real_robot.py --config [CONFIG] -- ckpt-path [CKPT_PATH
 
 ## Support
 
-If you encounter any issues while using this repository, don't hesitate to reach out to us. You can contact @mason directly or open an issue on GitLab for assistance.
+If you encounter any issues while using this repository, don't hesitate to reach out to us. You can contact [@liyinhao](https://github.com/yinchimaoliang) directly or open an issue on Github for assistance.
 
 ## Roadmap
 
@@ -201,7 +338,4 @@ If you encounter any issues while using this repository, don't hesitate to reach
 - The RLDS dataset will be deprecated and replaced by a Parquet dataset.
 - The logger functionality will be fully implemented.
 - issacsim will be supported.
-
-## Finetune huggingface models
-
-We support to finetune models directly downloaded from huggingface. We provide `configs/openvla/openvla_dino_siglip_llama2_libero_10_hf_finetune.py` as an example. Todo that, you should place the Python file containing all the necessary modules to build the structure of the model you intend to train into the `fluxvla/models/hf_models` directory. You can then utilize the `ddp_hf_finetune_runner` to complete the fine-tuning process.
+- Inference acceleration will be supported (torch.compile, Triton and CUDA ops).

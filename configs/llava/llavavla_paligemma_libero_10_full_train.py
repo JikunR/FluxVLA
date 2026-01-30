@@ -1,7 +1,21 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=  # noqa: E251
-    '/limx/tos/users/liyinhao/cache/openpi/openpi-assets/checkpoints/pi0_libero_pytorch/model.safetensors',  # noqa: E501. Refer to https://github.com/ZibinDong/openpi_pytorch
+    './checkpoints/pi0_base/model.safetensors',  # noqa: E501. Refer to https://github.com/ZibinDong/openpi_pytorch
     vlm_backbone=dict(
         type='PaliGemma',
         vlm_backbone_id='paligemma_3b_pt_224',
@@ -67,11 +81,11 @@ model = dict(
     freeze_projector=False,
     name_mapping={
         'vlm_backbone.vlm.model.language_model':
-        'model.paligemma_with_expert.paligemma.model.language_model',
+        'paligemma_with_expert.paligemma.model.language_model',
         'vlm_backbone.vlm.model.vision_tower':
-        'model.paligemma_with_expert.paligemma.model.vision_tower',
+        'paligemma_with_expert.paligemma.model.vision_tower',
         'vlm_backbone.vlm.model.multi_modal_projector':
-        'model.paligemma_with_expert.paligemma.model.multi_modal_projector',
+        'paligemma_with_expert.paligemma.model.multi_modal_projector'
     })
 
 train_dataloader = dict(
@@ -165,7 +179,7 @@ train_dataloader = dict(
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/limx/tos/limx_mani_data/raw_data/LIBERO_lerobot/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
+            './datasets/libero_10_no_noops_1.0.0_lerobot',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -235,8 +249,6 @@ runner = dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='constant',

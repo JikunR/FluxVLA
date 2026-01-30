@@ -1,3 +1,17 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='PI0FlowMatching',
     llm_backbone=dict(
@@ -88,7 +102,7 @@ model = dict(
     freeze_llm_backbone=False,
     freeze_vision_backbone=False,
     pretrained_name_or_path=  # noqa: E251
-    '/limx/tos/users/liyinhao/checkpoints/pi0_base/model.safetensors',  # noqa: E501
+    './checkpoints/pi0_base/model.safetensors',  # noqa: E501
     name_mapping={
         'llm_backbone': 'paligemma_with_expert.paligemma.model.language_model',
         'vision_backbone.vision':
@@ -124,18 +138,12 @@ train_dataloader = dict(
             'observation.state', 'observation.eepose', 'timestamp'
         ],
         datasets=dict(
-            aloha_4090=[
+            aloha=[
                 dict(
                     type='ParquetDataset',
                     data_root_path=  # noqa: E251
                     [
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250601_20250615_02_4090',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250616_20250630_02_4090',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250701_20250715_02_4090',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250716_20250731_02_4090',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250801_20250815_02_4090',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250816_20250831_02_4090',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250901_20250930_02_4090',  # noqa: E501
+                        './datasets/RealRobot_AgileX_aloha_lerobot_v2/20250601_20250615_02_4090'  # noqa: E501
                     ],
                     transforms=[
                         dict(
@@ -162,64 +170,7 @@ train_dataloader = dict(
                             tokenizer=dict(
                                 type='PretrainedTokenizer',
                                 model_path=  # noqa: E251
-                                '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
-                                # special_tokens={'pad_token': '<PAD>'}
-                            )),
-                        dict(type='ResizeImages', height=224, width=224),
-                        dict(
-                            type='NormalizeImages',
-                            means=[[123.515625, 116.04492188, 103.59375],
-                                   [123.515625, 116.04492188, 103.59375],
-                                   [123.515625, 116.04492188, 103.59375]],
-                            stds=[[58.27148438, 57.02636719, 57.27539062],
-                                  [58.27148438, 57.02636719, 57.27539062],
-                                  [58.27148438, 57.02636719, 57.27539062]],
-                        ),
-                        dict(
-                            type='NormalizeStatesAndActions',
-                            action_dim=32,
-                            state_dim=32,
-                            state_key='proprio',
-                            action_key='action',
-                            norm_type='proprio')
-                    ],
-                    action_window_size=50)
-            ],
-            aloha_4060=[
-                dict(
-                    type='ParquetDataset',
-                    data_root_path=  # noqa: E251
-                    [
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot/20250401_20250430_01_4060',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot/20250501_20250531_01_4060',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot/20250601_20250701_01_4060',  # noqa: E501
-                    ],
-                    transforms=[
-                        dict(
-                            type='ProcessParquetInputs',
-                            parquet_keys=[
-                                'observation.state', 'timestamp', 'actions',
-                                'info', 'stats', 'action_masks'
-                            ],
-                            video_keys=[
-                                'observation.images.cam_high',
-                                'observation.images.cam_left_wrist',
-                                'observation.images.cam_right_wrist'
-                            ],
-                            name_mappings={
-                                'observation.state': ['states'],
-                                'actions': ['actions']
-                            }),
-                        dict(
-                            type='ParquetPrompter',
-                            use_conversation=False,
-                            add_new_line=True),
-                        dict(
-                            type='ProcessPrompts',
-                            tokenizer=dict(
-                                type='PretrainedTokenizer',
-                                model_path=  # noqa: E251
-                                '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
+                                'checkpoints/paligemma-3b-pt-224',  # noqa: E501
                                 # special_tokens={'pad_token': '<PAD>'}
                             )),
                         dict(type='ResizeImages', height=224, width=224),
@@ -247,10 +198,7 @@ train_dataloader = dict(
                     type='ParquetDataset',
                     data_root_path=  # noqa: E251
                     [
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot/20250512_20250516_01',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot/20250517_20250524_01',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot/20250525_20250531_01',  # noqa: E501
-                        '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot/20250601_20250605_01',  # noqa: E501
+                        './datasets/RealRobot_UR3_Chem_lerobot_v2/20251204_20251205_01'  # noqa: E501
                     ],
                     transforms=[
                         dict(
@@ -277,7 +225,7 @@ train_dataloader = dict(
                             tokenizer=dict(
                                 type='PretrainedTokenizer',
                                 model_path=  # noqa: E251
-                                '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
+                                'checkpoints/paligemma-3b-pt-224',  # noqa: E501
                                 # special_tokens={'pad_token': '<PAD>'}
                             )),
                         dict(type='ResizeImages', height=224, width=224),
@@ -319,15 +267,13 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/limx_mani_checkpoints/open_source/huggingface/pi0',  # noqa: E501
+        'checkpoints/pi0_base',  # noqa: E501
         # special_tokens={'pad_token': '<PAD>'}
     ),
     metric=dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='constant',
