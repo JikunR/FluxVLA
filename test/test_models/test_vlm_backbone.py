@@ -1,4 +1,19 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import gc
+import os
 import unittest
 
 import numpy as np
@@ -6,6 +21,8 @@ import pytest
 import torch
 
 from fluxvla.engines import build_vlm_backbone_from_cfg
+
+QWEN2_5_VL_CKPT_PATH = './checkpoints/Qwen2.5-VL-3B-Instruct'
 
 
 class TestPaligemmaBackbone(unittest.TestCase):
@@ -132,6 +149,9 @@ class TestPaligemmaBackbone(unittest.TestCase):
                 atol=1e-3))
 
 
+@pytest.mark.skipif(
+    not os.path.exists(QWEN2_5_VL_CKPT_PATH),
+    reason=f'Checkpoint not found: {QWEN2_5_VL_CKPT_PATH}')
 class TestQWenVLBackbone(unittest.TestCase):
 
     def setUp(self):
@@ -142,7 +162,7 @@ class TestQWenVLBackbone(unittest.TestCase):
             type='QWen2_5VL',
             vlm_backbone_id='qwen2_5_3b_vl_pt_224',
             vlm_path=  # noqa: E251
-            '/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-VL-3B-Instruct',  # noqa: E501
+            QWEN2_5_VL_CKPT_PATH,  # noqa: E501
             vlm_config=dict(
                 type='Qwen2_5_VLForConditionalGeneration',
                 attention_dropout=0.0,

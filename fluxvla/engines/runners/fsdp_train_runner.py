@@ -1,3 +1,5 @@
+# Modified from https://github.com/openvla/openvla/blob/main/prismatic/training/strategies/fsdp.py  # noqa: E501
+
 import math
 import os
 from collections import OrderedDict

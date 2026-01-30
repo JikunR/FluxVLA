@@ -1,5 +1,4 @@
-"""Modified from https://github.com/ZibinDong/openpi_pytorch/blob/main/pi0/utils.py  # noqa: E501
-"""
+# Modified from https://github.com/ZibinDong/openpi_pytorch/blob/main/pi0/utils.py  # noqa: E501
 
 import math
 from typing import Optional

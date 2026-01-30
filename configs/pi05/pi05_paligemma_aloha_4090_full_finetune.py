@@ -1,3 +1,17 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='PI05FlowMatching',
     llm_backbone=dict(
@@ -86,7 +100,7 @@ model = dict(
     freeze_llm_backbone=False,
     freeze_vision_backbone=False,
     pretrained_name_or_path=  # noqa: E251
-    '/limx/tos/users/liyinhao/checkpoints/pi05_base/model.pth',  # noqa: E501
+    './checkpoints/pi05_base/model.safetensors',  # noqa: E501
     name_mapping={
         'llm_backbone': 'paligemma_with_expert.paligemma.model.language_model',
         'vision_backbone.vision':
@@ -98,6 +112,7 @@ model = dict(
         'time_mlp_out.projector': 'time_mlp_out',
         'action_in_proj.projector': 'action_in_proj',
         'action_out_proj.projector': 'action_out_proj',
+        'llm_backbone.embed_tokens': 'paligemma_with_expert.paligemma.lm_head',
     },
     params_to_change_dtype=[
         'llm_expert.llm.model.layers',
@@ -124,13 +139,7 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250601_20250615_02_4090',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250616_20250630_02_4090',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250701_20250715_02_4090',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250716_20250731_02_4090',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250801_20250815_02_4090',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250816_20250831_02_4090',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_AgileX_aloha_lerobot_v2/20250901_20250930_02_4090',  # noqa: E501
+                    './datasets/RealRobot_AgileX_aloha_lerobot_v2/20250601_20250615_02_4090',  # noqa: E501
                 ],
                 transforms=[
                     dict(
@@ -162,7 +171,7 @@ train_dataloader = dict(
                         tokenizer=dict(
                             type='PretrainedTokenizer',
                             model_path=  # noqa: E251
-                            '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
+                            'checkpoints/paligemma-3b-pt-224',  # noqa: E501
                             # special_tokens={'pad_token': '<PAD>'}
                         )),
                     dict(type='ResizeImages', height=224, width=224),
@@ -189,15 +198,13 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
+        'checkpoints/paligemma-3b-pt-224',  # noqa: E501
         # special_tokens={'pad_token': '<PAD>'}
     ),
     metric=dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='linear-warmup+cosine-decay',
@@ -209,158 +216,42 @@ runner = dict(
 inference = dict(
     type='AlohaInferenceRunner',
     task_descriptions={
-        '1':
-        'pick up the yellow chicken toy with left arm',
-        '2':
-        'place it in the brown flat cardboard box with right arm',
-        '3':
-        'pick up the pruple caterpillar toy with right arm',
-        '4':
-        'place it in the brown flat cardboard box with left arm',
-        '5':
-        'pick up the white racing car toy with right arm',
-        '6':
-        'pick up the white racing car toy with left arm',
-        '7':
-        'pick up the banana with left arm',
-        '8':
-        'place it on the blue plate with left arm',
+        '1': 'place it on the blue plate with right arm',
+        '2': 'pick up the green bowl with right arm',
+        '3': 'place it on the green bowl with left arm',
+        '4': 'pick up the green bowl with left arm',
+        '5': 'pick up the blue bowl with right arm',
+        '6': 'place it on the red plate with left arm',
+        '7': 'place it on the blue bowl with right arm',
+        '8': 'pick up the yellow bowl with left arm',
         '9':
-        'pick up the small tomato with left arm',
-        '10':
-        'pick up the lime with right arm',
-        '11':
-        'place it on the blue plate with right arm',
-        '12':
-        'hold the blue tissue package with left arm',
-        '13':
-        'grasp the tissue with right arm',
-        '14':
-        'place the tissue on the green plate with right arm',
-        '15':
-        'place the tissue in the gray trash can with left arm',
-        '16':
-        'pick up the tissue on the green plate with left arm',
-        '17':
-        'pull the tissue out of the blue package with right arm',
-        '18':
-        ('grasp the long green stems of off-white flower bouquet on the table '
-         'with right arm'),
-        '19':
-        'place the lid of the black bottle on the table with right arm',
-        '20':
-        ('return the bottle to its upright position and places it back on the '
-         'table with left arm'),
-        '21':
-        'lift up the black bottle with left arm',
-        '22':
-        'grasp the lid of the black bottle with right arm',
-        '23':
-        'place the green bowl on the table with right arm',
-        '24':
-        'grasp the black bottle with left arm',
-        '25': (
-            'place the lid of the black bottle on the brown drawer with right arm'  # noqa: E501
-        ),
-        '26': (
-            'lift the bottle near the side of the green bowl that is farther away '  # noqa: E501
-            'from the camera with left arm'),
-        '27': (
-            'pull outward to open the second dark brown drawer from the bottom '  # noqa: E501
-            'with left arm'),
-        '28':
-        'pick up the blue bottle with left arm',
-        '29':
-        'pick up the small black yellow box with left arm',
-        '30': (
-            'place it in the second dark brown drawer from the bottom with left arm'  # noqa: E501
-        ),
-        '31':
-        ('grasp the handle of the second dark brown drawer from the bottom '
-         'with left arm'),
-        '32': (
-            'touch the outer surface of the opened dark brown drawer with left arm'  # noqa: E501
-        ),
-        '33': (
-            'rotate the tape dispenser downward to engage the cutting blade and '  # noqa: E501
-            'sever the tape with the right arm'),
-        '34': (
-            'hold down the tape end to ensure it adheres firmly to the box surface '  # noqa: E501
-            'with left arm'),
-        '35':
-        'pull the tape dispenser to the right to seal the box with right arm',
-        '36':
-        'grasp the yellow silicone lid with left arm',
-        '37':
-        'grasp the blue silicone lid with right arm',
-        '38':
-        ('push inward to close the opened dark brown drawer with left arm'),
-        '39':
-        'pick up the lime with left arm',
-        '40':
-        'pick up the banana with right arm',
-        '41':
-        'pick up the green and white glue stick with left arm',
-        '42':
-        ('cap the dark green cup with the yellow silicone lid with left arm'),
-        '43':
-        'grasp the pink silicone lid with right arm',
-        '44':
-        'grasp the yellow silicone lid with right arm',
-        '45':
-        ('cap the dark green cup with the yellow silicone lid with right arm'),
-        '46':
-        'grasp the pink silicone lid with left arm',
-        '47':
-        ('tilt the black bottle to pour its contents into the green bowl '
-         'with left arm'),
-        '48':
-        'grasp the green bowl with right arm',
-        '49':
-        'pick up the mushroom with right arm',
-        '50':
-        'grasp the blue silicone lid with left arm',
-        '51':
-        'pick up the yellow chicken toy with right arm',
-        '52':
-        'grasp the red bowl with right arm',
-        '53':
-        'lift up the red bowl with right arm',
-        '54':
-        ('lift the bottle near the side of the red bowl that is farther away '
-         'from the camera with left arm'),
-        '55':
-        'place the red bowl on the table with right arm',
-        '56':
-        'tilt the black bottle to pour its contents into the red bowl with left arm',  # noqa: E501
-        '57':
-        'pick up the pruple caterpillar toy with left arm',
-        '58':
-        'lift up the green bowl with right arm',
-        '59':
-        'pick up the corn with right arm',
-        '60':
-        'place it on the pink plate with left arm',
-        '61':
-        'pick up the kiwi with left arm',
-        '62':
-        'place it on the pink plate with right arm',
-        '63':
-        'pick up the small tomato with right arm',
-        '64':
-        'pick up the corn with left arm',
-        '65':
-        'pick up the mushroom with left arm',
-        '66':
-        'cap the brown cup with the pink silicone lid with right arm',
-        '67':
-        'pick up the kiwi with right arm',
-        '68':
-        'place it on the green plate with left arm',
-        '69':
-        'cap the brown cup with the pink silicone lid with left arm',
-        '70':
-        'place it on the green plate with right arm',
+        'pull in opposite directions to open the brown paper bag with both arms',  # noqa: E501
+        '10': 'grasp the bottom edge of the brown paper bag with right arm',
+        '11': 'let it drop onto the table by opening both grippers',
+        '12': 'pick up the golden chocolate ball with right arm',
+        '13': 'place it in the brown paper bag with right arm',
+        '14': 'pick up the tiger toy with right arm',
+        '15': 'pick up the robot dog toy with right arm',
+        '16': 'grasp the upper edge of the brown paper bag with left arm',
+        '17': 'pick up the shuttlecock with right arm',
+        '18': 'pick up the yellow bowl with right arm',
+        '19': 'place it on the yellow bowl with left arm',
+        '20': 'pick up the giraffe toy with right arm',
+        '21': 'pick up the zebra toy with right arm',
+        '22': 'pick up the basketball toy with right arm',
+        '23': 'place it in the paper bag with right arm',
+        '24': 'place it on the green plate with left arm',
+        '25': 'pick up the red bowl with left arm',
+        '26': 'place it on the red bowl with left arm',
+        '27': 'place it on the blue bowl with left arm',
+        '28': 'place it on the red plate with right arm',
+        '29': 'place it on the yellow bowl with right arm',
+        '30': 'place it on the blue plate with left arm',
+        '31': 'hold open the brown paper bag with left arm',
+        '32': 'pick up the blue bowl with left arm',
+        '33': 'place it on the green bowl with right arm',
+        '34': 'place it on the green plate with right arm',
+        '35': 'pick up the red bowl with right arm'
     },
     seed=7,
     dataset=dict(

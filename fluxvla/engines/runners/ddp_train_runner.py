@@ -1,3 +1,4 @@
+# Modified from https://github.com/openvla/openvla/blob/main/prismatic/training/strategies/ddp.py  # noqa: E501
 import os
 from collections import deque
 from pathlib import Path

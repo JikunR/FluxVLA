@@ -12,6 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Source: https://github.com/NVIDIA/Isaac-GR00T
+# Branch: n1.5-release
+# Path: gr00t/model/backbone/eagle2_hg_model/configuration_eagle2_5_vl.py
 
 import copy
 

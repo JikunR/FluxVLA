@@ -1,4 +1,19 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import gc
+import os
 import unittest
 
 import numpy as np
@@ -7,7 +22,13 @@ import torch
 
 from fluxvla.engines import build_vision_backbone_from_cfg
 
+DINO_CKPT_PATH = './checkpoints/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
+SIGLIP_CKPT_PATH = './checkpoints/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
 
+
+@pytest.mark.skipif(
+    not os.path.exists(DINO_CKPT_PATH),
+    reason=f'Checkpoint not found: {DINO_CKPT_PATH}')
 class TestHFCausalVisionBackbone(unittest.TestCase):
 
     def setUp(self):
@@ -20,13 +41,11 @@ class TestHFCausalVisionBackbone(unittest.TestCase):
             dino_config=dict(
                 model_id='dino',
                 file=  # noqa: E251
-                '/limx/tos/limx_mani_checkpoints/open_source/huggingface/vit_large_patch14_reg4_dinov2.lvd142m/model.safetensors'  # noqa: E501
-            ),
+                DINO_CKPT_PATH),
             siglip_config=dict(
                 model_id='siglip_224',
                 file=  # noqa: E251
-                '/limx/tos/limx_mani_checkpoints/open_source/huggingface/ViT-SO400M-14-SigLIP/open_clip_model.safetensors'  # noqa: E501
-            ))
+                SIGLIP_CKPT_PATH))
         self.siglip_vit = build_vision_backbone_from_cfg(self.cfg).cuda()
 
     @pytest.mark.skipif(

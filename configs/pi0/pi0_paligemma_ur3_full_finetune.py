@@ -1,3 +1,17 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 model = dict(
     type='PI0FlowMatching',
     llm_backbone=dict(
@@ -88,7 +102,7 @@ model = dict(
     freeze_llm_backbone=False,
     freeze_vision_backbone=False,
     pretrained_name_or_path=  # noqa: E251
-    '/limx/tos/users/liyinhao/checkpoints/pi0_base/model.safetensors',  # noqa: E501
+    './checkpoints/pi0_base/model.safetensors',  # noqa: E501
     name_mapping={
         'llm_backbone': 'paligemma_with_expert.paligemma.model.language_model',
         'vision_backbone.vision':
@@ -128,16 +142,7 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250501_20250531_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250601_20250607_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250608_20250611_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250612_20250615_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250616_20250815_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250816_20250822_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250823_20250831_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250901_20250907_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250908_20250915_01',  # noqa: E501
-                    '/limx/tos/limx_mani_data/raw_data/RealRobot_UR3_lerobot_v2/20250916_20250930_01',  # noqa: E501
+                    './datasets/RealRobot_UR3_Chem_lerobot_v2/20251204_20251205_01',  # noqa: E501
                 ],
                 transforms=[
                     dict(
@@ -158,7 +163,7 @@ train_dataloader = dict(
                         tokenizer=dict(
                             type='PretrainedTokenizer',
                             model_path=  # noqa: E251
-                            '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
+                            'checkpoints/paligemma-3b-pt-224',  # noqa: E501
                             # special_tokens={'pad_token': '<PAD>'}
                         )),
                     dict(type='ResizeImages', height=224, width=224),
@@ -198,15 +203,13 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/limx_mani_checkpoints/open_source/huggingface/paligemma-3b-pt-224',  # noqa: E501
+        'checkpoints/paligemma-3b-pt-224',  # noqa: E501
         # special_tokens={'pad_token': '<PAD>'}
     ),
     metric=dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        wandb_project='fluxvla',
-        wandb_entity='limx',
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='linear-warmup+cosine-decay',
@@ -221,27 +224,25 @@ inference = dict(
     seed=7,
     action_chunk=32,
     task_descriptions={
-        '1': 'pick up the shanghai green',
-        '2': 'put the shanghai green into the bamboo basket',
-        '3': 'put the apple into the gray plate',
-        '4': 'pick up the onion',
-        '5': 'put the lemon into the gray plate',
-        '6': 'put the onion into the gray plate',
-        '7': 'pick up the apple',
-        '8': 'pick up the lemon',
-        '9': 'pick up the mango',
-        '10': 'put the tomato into the pink plate',
-        '11': 'pick up the bitter melon',
-        '12': 'put the mango into the pink plate',
-        '13': 'pick up the peach',
-        '14': 'put the peach into the bamboo basket',
-        '15': 'pick up the pear',
-        '16': 'pick up the tomato',
-        '17': 'put the bitter melon into the pink plate',
-        '18': 'pull up to pull out the tape on the gray base',
-        '19': 'clamp the torn tape on the gray base',
-        '20': 'press down to cut the tape on the gray base',
-        '21': 'put the pear into the bamboo basket'
+        '1': 'put the measuring cylinder back on the tabletop',
+        '2': 'place the erlenmeyer flask back on the tabletop',
+        '3': 'grasp the measuring cylinder',
+        '4': 'grasp the neck of the erlenmeyer flask',
+        '5':
+        'pour the liquid in the transparent wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
+        '6': 'put the transparent wide-mouth bottle back on the tabletop',
+        '7': 'shake the erlenmeyer flask',
+        '8':
+        'pour the liquid in the measuring cylinder into the erlenmeyer flask',
+        '9': 'place the bottle stopper upside down on the tabletop',
+        '10': 'empty',
+        '11': 'grasp the stopper of the transparent wide-mouth bottle',
+        '12': 'grasp the body of the transparent wide-mouth bottle',
+        '13': 'grasp the body of the dark-colored wide-mouth bottle',
+        '14': 'grasp the stopper of the dark-colored wide-mouth bottle',
+        '15':
+        'pour the liquid in the dark-colored wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
+        '16': 'put the dark-colored wide-mouth bottle back on the tabletop'
     },
     dataset=dict(
         type='PrivateInferenceDataset',
