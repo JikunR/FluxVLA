@@ -120,7 +120,7 @@ model = dict(
         'vlm_backbone.vlm.model.vision_tower',
         'vlm_backbone.vlm.model.multi_modal_projector',
     ],
-    ori_action_dim=14,
+    ori_action_dim=7,
 )
 
 inference_model = model.copy()
@@ -181,7 +181,7 @@ train_dataloader = dict(
 
 runner = dict(
     type='FSDPTrainRunner',
-    max_epochs=24,
+    max_epochs=6,
     learning_rate=5e-5,
     weight_decay=0.01,
     max_grad_norm=1.0,

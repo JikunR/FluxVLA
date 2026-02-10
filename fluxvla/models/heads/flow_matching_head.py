@@ -354,12 +354,12 @@ class FlowMatchingHead(nn.Module):
             device=input_features.device,
         )
 
-        num_steps = self.num_inference_timesteps
-        dt = 1.0 / num_steps
+        dt = 1.0 / self.num_inference_timesteps
 
         # Run denoising steps.
-        for t in range(num_steps):
-            t_cont = t / float(num_steps)  # e.g. goes 0, 1/N, 2/N, ...
+        for t in range(self.num_inference_timesteps):
+            t_cont = t / float(
+                self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
             t_discretized = int(t_cont * self.num_timestep_buckets)
 
             # Embed noised action trajectory.

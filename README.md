@@ -14,30 +14,29 @@ A Unified, Modular, and Deployable VLA Codebase.
 
 ## Installation
 
+### Create conda environment
+
+```
+conda create -n fluxvla python=3.10 -y
+conda activate fluxvla
+```
+
 ### Install pytorch
 
 ```
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 ```
 
-### Install LIBERO
-
-```
-git clone https://github.com/Lifelong-Robot-Learning/LIBERO
-cd LIBERO
-pip install -r requirements.txt
-pip install -e .
-```
-
-Due to PyTorch version changes, LIBERO may require some accommodations; in particular, the way we use torch.load might need to be updated.
-
-### Install transformers
-
-```
-pip install transformers==4.53.2
-```
-
 ### Install flash-attention
+
+Option 1: Install directly via pip:
+
+```
+
+pip install flash-attn==2.5.5 --no-build-isolation --find-links https://github.com/Dao-AILab/flash-attention/releases
+```
+
+Option 2: Build from source:
 
 ```
 git clone https://github.com/Dao-AILab/flash-attention.git
@@ -46,12 +45,10 @@ git checkout v2.5.5
 MAX_JOBS=4 python setup.py install
 ```
 
-### Install dlimp
+### Install av
 
 ```
-git clone https://github.com/kvablack/dlimp
-cd dlimp
-pip install -e .
+conda install -c conda-forge av=14.4.0
 ```
 
 ### Install fluxvla
@@ -59,6 +56,15 @@ pip install -e .
 ```
 pip install -r requirements.txt
 python setup.py develop
+```
+
+### Fix numpy version (Required)
+
+Some dependencies may install a higher version of numpy, but this project requires numpy 1.26.4. Run the following command to fix it:
+
+```
+pip uninstall numpy
+pip install numpy==1.26.4
 ```
 
 ### Online Evaluation Environment Setup
@@ -237,26 +243,6 @@ Download the required pretrained checkpoints and place them in the `./checkpoint
 
 ### Debug locally
 
-You can use the `train_local.sh` script for convenient local single-machine training, or use `torchrun` directly.
-
-**Using train_local.sh (Recommended):**
-
-```
-export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
-bash scripts/train_local.sh [CONFIG] [WORK_DIR] [NUM_GPUS] [OTHER_ARGS...]
-```
-
-For example, if you train PI0.5 on libero dataset with 2 GPUs:
-
-```
-export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
-bash scripts/train_local.sh configs/pi05/pi05_paligemma_libero10_full_finetune.py ./work_dirs/pi05_paligemma_libero10_full_finetune 2 --cfg-options train_dataloader.per_device_batch_size=2
-```
-
-**Using torchrun directly:**
-
 ```
 /root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node [NUM_GPUS] scripts/train.py --config [CONFIG_PATH] --work-dir [WORK_DIR] --cfg-options train_dataloader.per_device_batch_size=[PER_DEVICE_BATCH_SIZE]
 ```
@@ -266,7 +252,7 @@ For example:
 ```
 export WANDB_MODE=disabled
 export HF_ENDPOINT="https://hf-mirror.com"
-/root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py --config configs/pi05/pi05_paligemma_libero10_full_finetune.py --work-dir ./work_dirs/pi05_paligemma_libero10_full_finetune --cfg-options train_dataloader.per_device_batch_size=2
+/root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune --cfg-options train_dataloader.per_device_batch_size=2
 ```
 
 ### Eval locally
@@ -293,9 +279,9 @@ To resume training from a checkpoint, use the `--resume-from` parameter to speci
 export WANDB_MODE=disabled
 export HF_ENDPOINT="https://hf-mirror.com"
 /root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py \
-  --config configs/pi05/pi05_paligemma_libero10_full_finetune.py \
-  --work-dir ./work_dirs/pi05_paligemma_libero10_full_finetune \
-  --resume-from ./work_dirs/pi05_paligemma_libero10_full_finetune/checkpoints/checkpoint_epoch_5.pth \
+  --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
+  --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune \
+  --resume-from ./work_dirs/pi05_paligemma_libero_10_full_finetune/checkpoints/checkpoint_epoch_5.pth \
   --cfg-options train_dataloader.per_device_batch_size=2
 ```
 
