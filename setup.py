@@ -71,6 +71,19 @@ setup(
         'Operating System :: OS Independent',
     ],
     install_requires=[],
-    ext_modules=[],
+    ext_modules=[
+        make_cuda_ext(
+            name='gemma_rotary_embedding_ext',
+            module='fluxvla.ops.cuda.gemma_rotary_embedding',
+            sources=['src/gemma_rotary_embedding_forward.cpp'],
+            sources_cuda=['src/gemma_rotary_embedding_forward_cuda.cu'],
+        ),
+        make_cuda_ext(
+            name='rotary_pos_embedding_ext',
+            module='fluxvla.ops.cuda.rotary_pos_embedding',
+            sources=['src/rotary_pos_embedding_forward.cpp'],
+            sources_cuda=['src/rotary_pos_embedding_forward_cuda.cu'],
+        ),
+    ],
     cmdclass={'build_ext': BuildExtension},
 )

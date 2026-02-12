@@ -22,7 +22,6 @@ from typing import Dict
 import torch
 import torch.distributed as dist
 import tqdm
-from libero.libero import benchmark
 
 from fluxvla.engines.utils import initialize_overwatch
 from fluxvla.engines.utils.eval_utils import (get_libero_dummy_action,
@@ -30,6 +29,7 @@ from fluxvla.engines.utils.eval_utils import (get_libero_dummy_action,
                                               save_rollout_video)
 from fluxvla.engines.utils.name_map import str_to_dtype
 from fluxvla.engines.utils.torch_utils import set_seed_everywhere
+from libero.libero import benchmark
 from ..utils.root import RUNNERS
 
 overwatch = initialize_overwatch(__name__)
@@ -83,7 +83,10 @@ class LiberoEvalRunner:
                                      build_transform_from_cfg,
                                      build_vla_from_cfg)
         self.device_id = overwatch.local_rank()
-        self.vla = build_vla_from_cfg(cfg.model).eval()
+        if hasattr(cfg, 'inference_model'):
+            self.vla = build_vla_from_cfg(cfg.inference_model).eval()
+        else:
+            self.vla = build_vla_from_cfg(cfg.model).eval()
         # Load checkpoint weights if ckpt_path is provided
         if ckpt_path is not None:
             assert Path.exists(Path(ckpt_path)), \

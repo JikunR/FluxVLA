@@ -1,0 +1,373 @@
+# Modified from https://github.com/dexmal/realtime-vla/blob/main/pi0_infer.py
+
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_small_bias(inp_ptr, weight_ptr, out_ptr, bias_ptr,
+                      seq_len: tl.constexpr, features: tl.constexpr,
+                      hidden: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+                      BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N)
+    grid_j = tl.cdiv(hidden, BLOCK_SIZE_M)
+    for p in range(pid, grid_i * grid_j, psize):
+        i = (p // grid_j) * BLOCK_SIZE_N
+        j = (p % grid_j) * BLOCK_SIZE_M
+        acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+        acc += tl.load(
+            bias_ptr + (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            mask=((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+            other=0.0)
+        for k in range(0, features, BLOCK_SIZE_K):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        tl.store(
+            out_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            acc.to(tl.bfloat16),
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden))
+
+
+@triton.jit
+def matmul_small_bias_res(inp_ptr, weight_ptr, out_ptr, bias_ptr, res_ptr,
+                          seq_len: tl.constexpr, features: tl.constexpr,
+                          hidden: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+                          BLOCK_SIZE_M: tl.constexpr,
+                          BLOCK_SIZE_K: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N)
+    grid_j = tl.cdiv(hidden, BLOCK_SIZE_M)
+    for p in range(pid, grid_i * grid_j, psize):
+        i = (p // grid_j) * BLOCK_SIZE_N
+        j = (p % grid_j) * BLOCK_SIZE_M
+        acc = tl.load(
+            res_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+            other=0.0).to(tl.float32)
+        acc += tl.load(
+            bias_ptr + (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            mask=((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+            other=0.0)
+        for k in range(0, features, BLOCK_SIZE_K):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        tl.store(
+            out_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            acc.to(tl.bfloat16),
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden))
+
+
+@triton.jit
+def matmul_small_bias_res_mod(inp_ptr, weight_ptr, out_ptr, bias_ptr, res_ptr,
+                              seq_len: tl.constexpr, features: tl.constexpr,
+                              hidden: tl.constexpr, i_mod: tl.constexpr,
+                              BLOCK_SIZE_N: tl.constexpr,
+                              BLOCK_SIZE_M: tl.constexpr,
+                              BLOCK_SIZE_K: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N)
+    grid_j = tl.cdiv(hidden, BLOCK_SIZE_M)
+    for p in range(pid, grid_i * grid_j, psize):
+        i = (p // grid_j) * BLOCK_SIZE_N
+        j = (p % grid_j) * BLOCK_SIZE_M
+        acc = tl.load(
+            res_ptr +
+            ((i + tl.arange(0, BLOCK_SIZE_N))[:, None] % i_mod) * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+            other=0.0).to(tl.float32)
+        acc += tl.load(
+            bias_ptr + (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            mask=((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+            other=0.0)
+        for k in range(0, features, BLOCK_SIZE_K):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        tl.store(
+            out_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            acc.to(tl.bfloat16),
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden))
+
+
+@triton.jit
+def matmul_512x1152x1152_twopart_bias_res(old_ptr, inp_ptr, weight_ptr,
+                                          bias_ptr, out_ptr, out2_ptr,
+                                          seq_len: tl.constexpr,
+                                          features: tl.constexpr,
+                                          hidden: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    hidden1 = 1024
+
+    BLOCK_SIZE_N1: tl.constexpr = 64
+    BLOCK_SIZE_M1: tl.constexpr = 64
+    BLOCK_SIZE_K1: tl.constexpr = 32
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N1)
+    grid_j = tl.cdiv(hidden1, BLOCK_SIZE_M1)
+
+    for p in range(pid, grid_i * grid_j, psize):
+        i = (p // grid_j) * BLOCK_SIZE_N1
+        j = (p % grid_j) * BLOCK_SIZE_M1
+        acc = tl.load(old_ptr +
+                      (i + tl.arange(0, BLOCK_SIZE_N1))[:, None] * hidden +
+                      (j + tl.arange(0, BLOCK_SIZE_M1))[None, :]).to(
+                          tl.float32)
+        acc += tl.load(bias_ptr +
+                       (j + tl.arange(0, BLOCK_SIZE_M1))[None, :]).to(
+                           tl.float32)
+        for k in range(0, features, BLOCK_SIZE_K1):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N1))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K1))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N1))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K1))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K1))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M1))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K1))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M1))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        tl.store(
+            out_ptr + (i + tl.arange(0, BLOCK_SIZE_N1))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M1))[None, :],
+            acc.to(tl.bfloat16),
+            mask=((i + tl.arange(0, BLOCK_SIZE_N1))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M1))[None, :] < hidden))
+
+    BLOCK_SIZE_N2: tl.constexpr = 32
+    BLOCK_SIZE_M2: tl.constexpr = 32
+    BLOCK_SIZE_K2: tl.constexpr = 32
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N2)
+    grid_j = tl.cdiv(hidden - hidden1, BLOCK_SIZE_M2)
+    grid_k = 4
+    for p in range(pid, grid_i * grid_j * grid_k, psize):
+        i = (p // (grid_j * grid_k)) * BLOCK_SIZE_N2
+        j = ((p // grid_k) % grid_j) * BLOCK_SIZE_M2 + hidden1
+        k0 = p % grid_k
+        acc = tl.zeros((BLOCK_SIZE_N2, BLOCK_SIZE_M2), dtype=tl.float32)
+        if k0 == 0:
+            acc += tl.load(old_ptr +
+                           (i + tl.arange(0, BLOCK_SIZE_N2))[:, None] *
+                           hidden +
+                           (j + tl.arange(0, BLOCK_SIZE_M2))[None, :]).to(
+                               tl.float32)
+            acc += tl.load(bias_ptr +
+                           (j + tl.arange(0, BLOCK_SIZE_M2))[None, :]).to(
+                               tl.float32)
+        for k in range(k0 * BLOCK_SIZE_K2, features, BLOCK_SIZE_K2 * grid_k):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N2))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K2))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N2))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K2))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K2))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M2))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K2))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M2))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        tl.store(
+            out2_ptr + (i + tl.arange(0, BLOCK_SIZE_N2))[:, None] *
+            ((hidden - hidden1) * grid_k) +
+            (j - hidden1 + tl.arange(0, BLOCK_SIZE_M2))[None, :] + k0 *
+            (hidden - hidden1),
+            acc.to(tl.bfloat16),
+            mask=((i + tl.arange(0, BLOCK_SIZE_N2))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M2))[None, :] < hidden))
+
+
+@triton.jit
+def matmul_small_bias_gelu(inp_ptr, weight_ptr, out_ptr, bias_ptr,
+                           seq_len: tl.constexpr, features: tl.constexpr,
+                           hidden: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+                           BLOCK_SIZE_M: tl.constexpr,
+                           BLOCK_SIZE_K: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N)
+    grid_j = tl.cdiv(hidden, BLOCK_SIZE_M)
+    for p in range(pid, grid_i * grid_j, psize):
+        i = (p // grid_j) * BLOCK_SIZE_N
+        j = (p % grid_j) * BLOCK_SIZE_M
+        acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+        acc += tl.load(
+            bias_ptr + (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            mask=((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+            other=0.0)
+        for k in range(0, features, BLOCK_SIZE_K):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        acc = acc * tl.sigmoid(1.5957691216057308 * acc *
+                               (1 + 0.044715 * acc * acc))
+        tl.store(
+            out_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+            acc.to(tl.bfloat16),
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden))
+
+
+@triton.jit
+def matmul_split_k(inp_ptr, weight_ptr, out_ptr, seq_len: tl.constexpr,
+                   features: tl.constexpr, hidden: tl.constexpr,
+                   BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
+                   BLOCK_SIZE_K: tl.constexpr, SPLIT_K: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    grid_i = tl.cdiv(seq_len, BLOCK_SIZE_N)
+    grid_j = tl.cdiv(hidden, BLOCK_SIZE_M)
+    grid_k = SPLIT_K
+    for p in range(pid, grid_i * grid_j * grid_k, psize):
+        i = (p // (grid_j * grid_k)) * BLOCK_SIZE_N
+        j = (p // grid_k % grid_j) * BLOCK_SIZE_M
+        k_s = p % grid_k
+        acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+        k_beg = k_s * tl.cdiv(features, BLOCK_SIZE_K) // SPLIT_K * BLOCK_SIZE_K
+        k_end = (k_s + 1) * tl.cdiv(features,
+                                    BLOCK_SIZE_K) // SPLIT_K * BLOCK_SIZE_K
+        for k in range(k_beg, k_end, BLOCK_SIZE_K):
+            x = tl.load(
+                inp_ptr +
+                (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * features +
+                (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
+                mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+                ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
+                other=0.0)
+            w = tl.load(
+                weight_ptr +
+                (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
+                (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
+                mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
+                ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
+                other=0.0)
+            acc = tl.dot(x, w, acc)
+        tl.store(
+            out_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
+            (j + tl.arange(0, BLOCK_SIZE_M))[None, :] + k_s * seq_len * hidden,
+            acc,
+            mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
+            ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden))
+
+
+@triton.jit
+def merge_split_k_bias_res(out_ptr,
+                           bias_ptr,
+                           res_ptr,
+                           final_out_ptr,
+                           seq_len: tl.constexpr,
+                           hidden: tl.constexpr,
+                           SPLIT_K: tl.constexpr,
+                           BLOCK: tl.constexpr = 512):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    for i in range(pid * BLOCK, seq_len * hidden, psize * BLOCK):
+        acc = tl.load(
+            res_ptr + i + tl.arange(0, BLOCK),
+            mask=(i + tl.arange(0, BLOCK)) < (seq_len * hidden),
+            other=0.0).to(tl.float32)
+        acc += tl.load(
+            bias_ptr + (i + tl.arange(0, BLOCK)) % hidden,
+            mask=(i + tl.arange(0, BLOCK)) < (seq_len * hidden),
+            other=0.0).to(tl.float32)
+        for k in range(SPLIT_K):
+            offset = k * seq_len * hidden
+            mask = (i + tl.arange(0, BLOCK)) < (seq_len * hidden)
+            vals = tl.load(
+                out_ptr + offset + i + tl.arange(0, BLOCK),
+                mask=mask,
+                other=0.0)
+            acc += vals.to(tl.float32)
+        mask = (i + tl.arange(0, BLOCK)) < (seq_len * hidden)
+        tl.store(
+            final_out_ptr + i + tl.arange(0, BLOCK),
+            acc.to(tl.bfloat16),
+            mask=mask)
+
+
+@triton.jit
+def combine_1536_1152_twopart(out_ptr, inp_ptr, seq_len: tl.constexpr,
+                              hidden: tl.constexpr):
+    pid = tl.program_id(0)
+    psize = tl.num_programs(0)
+    for i in range(pid * 2, seq_len, psize * 2):
+        inp = tl.load(inp_ptr + (i + tl.arange(0, 2)[:, None]) * 128 * 4 +
+                      tl.arange(0, 128)).to(tl.float32)
+        for j in range(1, 4):
+            inp += tl.load(inp_ptr + (i + tl.arange(0, 2)[:, None]) * 128 * 4 +
+                           tl.arange(0, 128) + 128 * j).to(tl.float32)
+        tl.store(
+            out_ptr + (i + tl.arange(0, 2)[:, None]) * hidden + 1024 +
+            tl.arange(0, 128), inp.to(tl.bfloat16))

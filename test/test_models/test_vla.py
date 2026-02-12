@@ -129,7 +129,7 @@ class TestGr00t(unittest.TestCase):
         self.cfg = dict(
             type='LlavaVLA',
             pretrained_name_or_path=  # noqa: E251
-            GR00T_CKPT_PATH,
+            './checkpoints/GR00T-N1.5-3B',
             vlm_backbone=dict(
                 type='EagleBackbone',
                 vlm_path=  # noqa: E251
@@ -143,7 +143,8 @@ class TestGr00t(unittest.TestCase):
                 num_heads=4,
                 num_inference_timesteps=4,
                 traj_length=10,
-                action_dim=7),
+                action_dim=7,
+                ori_action_dim=7),
             freeze_vlm_backbone=False,
             name_mapping={
                 'vlm_backbone.vlm': 'backbone.eagle_model',
@@ -191,6 +192,43 @@ class TestGr00t(unittest.TestCase):
         self.assertTrue(
             np.allclose(
                 output['loss'].cpu().detach().numpy(), 2.629, atol=1e-2))
+
+    def test_predict_action(self):
+        images = np.load(
+            'test/data/models/vlas/llavavla/images.npy', allow_pickle=True)
+        images = torch.from_numpy(images).cuda().repeat_interleave(
+            8, dim=2).repeat_interleave(
+                8, dim=3)
+        img_masks = np.load(
+            'test/data/models/vlas/llavavla/img_masks.npy', allow_pickle=True)
+        img_masks = torch.from_numpy(img_masks).cuda()
+        lang_tokens = np.load(
+            'test/data/models/vlas/gr00t/lang_tokens.npy',
+            allow_pickle=True).repeat(2, 0)
+        lang_tokens = torch.from_numpy(lang_tokens).cuda()
+        lang_masks = np.load(
+            'test/data/models/vlas/gr00t/lang_tokens.npy',
+            allow_pickle=True).repeat(2, 0)
+        lang_masks = torch.from_numpy(lang_masks).cuda()
+        states = torch.from_numpy(
+            np.load('test/data/models/vlas/llavavla/states.npy')).cuda()
+        pred_actions_target = np.load(
+            'test/data/models/vlas/gr00t/pred_actions.npy', allow_pickle=True)
+        embodiment_ids = torch.ones((2)).cuda().long()
+        with torch.no_grad():
+            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=True):
+                pred_actions = self.vla.predict_action(
+                    images=images,
+                    img_masks=img_masks,
+                    lang_tokens=lang_tokens,
+                    lang_masks=lang_masks,
+                    states=states,
+                    embodiment_ids=embodiment_ids)
+        self.assertTrue(
+            np.allclose(
+                pred_actions.cpu().detach().numpy(),
+                pred_actions_target,
+                atol=1e-2))
 
 
 @pytest.mark.skipif(

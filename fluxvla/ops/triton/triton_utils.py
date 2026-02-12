@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .eagle import EagleBackbone, EagleInferenceBackbone  # noqa: F401, F403
-from .paligemma import PaliGemma  # noqa: F401, F403
-from .qwen2_5_vl import QWen2_5VL  # noqa: F401, F403
+import torch
+import triton.language as tl
+
+
+def get_triton_dtype(torch_dtype):
+    """Change PyTorch dtype to Triton dtype"""
+    dtype_map = {
+        torch.float32: tl.float32,
+        torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16,
+        torch.float64: tl.float64,
+    }
+    return dtype_map.get(torch_dtype, tl.float32)

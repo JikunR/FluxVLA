@@ -22,7 +22,7 @@ model = dict(
         'fluxvla/models/third_party_models/eagle2_hg_model'),
     vla_head=dict(
         type='FlowMatchingHead',
-        state_dim=32,
+        state_dim=64,
         hidden_size=1024,
         input_embedding_dim=1536,
         num_layers=1,
@@ -37,6 +37,38 @@ model = dict(
         'vla_head': 'action_head'
     },
     freeze_projector=False)
+
+inference_model = dict(
+    type='LlavaVLA',
+    pretrained_name_or_path=  # noqa: E251
+    './checkpoints/GR00T-N1.5-3B',
+    vlm_backbone=dict(
+        type='EagleInferenceBackbone',
+        vlm_path=  # noqa: E251
+        'fluxvla/models/third_party_models/eagle2_hg_model'),
+    vla_head=dict(
+        type='FlowMatchingHead',
+        state_dim=64,
+        hidden_size=1024,
+        input_embedding_dim=1536,
+        num_layers=1,
+        num_heads=4,
+        num_inference_timesteps=4,
+        traj_length=10,
+        action_dim=32,
+        ori_action_dim=7,
+        diffusion_model_cfg=dict(
+            attention_head_dim=48,
+            cross_attention_dim=2048,
+            dropout=0.2,
+            final_dropout=True,
+            interleave_self_attention=True,
+            norm_type='ada_norm',
+            num_attention_heads=32,
+            num_layers=16,
+            output_dim=1024,
+            use_torch_compile=True,
+            positional_embeddings=None)))
 
 train_dataloader = dict(
     per_device_batch_size=8,
@@ -168,7 +200,7 @@ train_dataloader = dict(
                 dict(
                     type='NormalizeStatesAndActions',
                     action_dim=32,
-                    state_dim=32,
+                    state_dim=64,
                     state_key='proprio',
                     action_key='action',
                     norm_type='mean_std')
@@ -250,7 +282,7 @@ eval = dict(
                 )),
             dict(
                 type='LiberoProprioFromInputs',
-                state_dim=32,
+                state_dim=64,
                 norm_type='mean_std',
                 pos_key='robot0_eef_pos',
                 quat_key='robot0_eef_quat',
