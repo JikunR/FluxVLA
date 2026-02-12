@@ -24,6 +24,10 @@ from diffusers.models.embeddings import (SinusoidalPositionalEmbedding,
                                          TimestepEmbedding, Timesteps)
 from torch import nn
 
+from fluxvla.engines.utils.overwatch import initialize_overwatch
+
+overwatch = initialize_overwatch(__name__)
+
 
 class TimestepEncoder(nn.Module):
     """
@@ -257,8 +261,15 @@ class DiT(ModelMixin, ConfigMixin):
         positional_embeddings: Optional[str] = 'sinusoidal',
         interleave_self_attention=False,
         cross_attention_dim: Optional[int] = None,
+        enable_timing: bool = False,
+        use_torch_compile: bool = False,
+        compile_mode: str = 'reduce-overhead',
     ):
         super().__init__()
+        self.enable_timing = enable_timing
+        self.use_torch_compile = use_torch_compile
+        self.compile_mode = compile_mode
+        self._compiled_forward = None
 
         self.attention_head_dim = attention_head_dim
         self.inner_dim = (
@@ -309,6 +320,65 @@ class DiT(ModelMixin, ConfigMixin):
             sum(p.numel() for p in self.parameters() if p.requires_grad),
         )
 
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        temb: torch.Tensor,
+        return_all_hidden_states: bool = False,
+    ):
+        """Core forward implementation for CUDA graph capture."""
+        all_hidden_states = [hidden_states] if return_all_hidden_states else []
+
+        # Process through transformer blocks
+        for idx, block in enumerate(self.transformer_blocks):
+            if idx % 2 == 1 and self.config.interleave_self_attention:
+                hidden_states = block(
+                    hidden_states,
+                    attention_mask=None,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    temb=temb,
+                )
+            else:
+                hidden_states = block(
+                    hidden_states,
+                    attention_mask=None,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=None,
+                    temb=temb,
+                )
+            if return_all_hidden_states:
+                all_hidden_states.append(hidden_states)
+
+        # Output processing
+        shift, scale = self.proj_out_1(F.silu(temb)).chunk(2, dim=1)
+        hidden_states = (
+            self.norm_out(hidden_states) * (1 + scale[:, None]) +
+            shift[:, None])
+        output = self.proj_out_2(hidden_states)
+
+        if return_all_hidden_states:
+            return output, all_hidden_states
+        return output
+
+    def compile_model(self, mode: str = 'reduce-overhead'):
+        """Compile the forward implementation with torch.compile.
+
+        Args:
+            mode: Compilation mode. Options:
+                - 'default': Good balance of compile time and speedup
+                - 'reduce-overhead': Best for inference (recommended)
+                - 'max-autotune': Best speedup but slow compilation
+        """
+        if self._compiled_forward is None:
+            self._compiled_forward = torch.compile(
+                self._forward_impl,
+                mode=mode,
+                fullgraph=True,
+            )
+            overwatch.info(f'[DiT] Model compiled with mode={mode}')
+
     def forward(
         self,
         hidden_states: torch.Tensor,  # Shape: (B, T, D)
@@ -323,6 +393,19 @@ class DiT(ModelMixin, ConfigMixin):
         # Process through transformer blocks - single pass through the blocks
         hidden_states = hidden_states.contiguous()
         encoder_hidden_states = encoder_hidden_states.contiguous()
+
+        # Use torch.compile for inference acceleration (recommended)
+        if self.use_torch_compile and not self.training:
+            if self._compiled_forward is None:
+                self.compile_model(
+                    self.compile_mode
+                )  # 'default'模式更通用，'reduce-overhead'对小batch可能反而更慢
+            output = self._compiled_forward(hidden_states,
+                                            encoder_hidden_states, temb,
+                                            return_all_hidden_states)
+            if return_all_hidden_states:
+                return output
+            return output
 
         all_hidden_states = [hidden_states]
 
@@ -352,8 +435,11 @@ class DiT(ModelMixin, ConfigMixin):
         hidden_states = (
             self.norm_out(hidden_states) * (1 + scale[:, None]) +
             shift[:, None])
+
+        output = self.proj_out_2(hidden_states)
+
         if return_all_hidden_states:
-            return self.proj_out_2(hidden_states), all_hidden_states
+            return output, all_hidden_states
         else:
             return self.proj_out_2(hidden_states)
 
@@ -377,6 +463,8 @@ class SelfAttentionTransformer(ModelMixin, ConfigMixin):
         compute_dtype=torch.float32,
         final_dropout: bool = True,
         positional_embeddings: Optional[str] = 'sinusoidal',
+        use_torch_compile: bool = False,
+        compile_mode: str = 'reduce-overhead',
         interleave_self_attention=False,
     ):
         super().__init__()
@@ -385,7 +473,9 @@ class SelfAttentionTransformer(ModelMixin, ConfigMixin):
         self.inner_dim = (
             self.config.num_attention_heads * self.config.attention_head_dim)
         self.gradient_checkpointing = False
-
+        self.use_torch_compile = use_torch_compile
+        self.compile_mode = compile_mode
+        self._compiled_forward = None
         self.transformer_blocks = nn.ModuleList([
             BasicTransformerBlock(
                 self.inner_dim,
@@ -406,6 +496,40 @@ class SelfAttentionTransformer(ModelMixin, ConfigMixin):
             sum(p.numel() for p in self.parameters() if p.requires_grad),
         )
 
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        return_all_hidden_states: bool = False,
+    ):
+        all_hidden_states = [hidden_states] if return_all_hidden_states else []
+        """Core forward implementation for CUDA graph capture."""
+        for idx, block in enumerate(self.transformer_blocks):
+            hidden_states = block(hidden_states)
+            all_hidden_states.append(hidden_states)
+
+        if return_all_hidden_states:
+            return hidden_states, all_hidden_states
+        else:
+            return hidden_states
+
+    def compile_model(self, mode: str = 'reduce-overhead'):
+        """Compile the forward implementation with torch.compile.
+
+        Args:
+            mode: Compilation mode. Options:
+                - 'default': Good balance of compile time and speedup
+                - 'reduce-overhead': Best for inference (recommended)
+                - 'max-autotune': Best speedup but slow compilation
+        """
+        if self._compiled_forward is None:
+            self._compiled_forward = torch.compile(
+                self._forward_impl,
+                mode=mode,
+                fullgraph=True,
+            )
+            overwatch.info(
+                f'[SelfAttentionTransformer] Model compiled with mode={mode}')
+
     def forward(
         self,
         hidden_states: torch.Tensor,  # Shape: (B, T, D)
@@ -414,6 +538,13 @@ class SelfAttentionTransformer(ModelMixin, ConfigMixin):
         # Process through transformer blocks - single pass through the blocks
         hidden_states = hidden_states.contiguous()
         all_hidden_states = [hidden_states]
+
+        if self.use_torch_compile and not self.training:
+            if self._compiled_forward is None:
+                self.compile_model(self.compile_mode)
+            output = self._compiled_forward(hidden_states,
+                                            return_all_hidden_states)
+            return output
 
         # Process through transformer blocks
         for idx, block in enumerate(self.transformer_blocks):

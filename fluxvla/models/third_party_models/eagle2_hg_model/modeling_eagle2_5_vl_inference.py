@@ -1,13 +1,7 @@
-# --------------------------------------------------------
-# NVIDIA
-# Copyright (c) 2025 NVIDIA
-# Licensed under The MIT License [see LICENSE for details]
-# --------------------------------------------------------
-
-#
 # Source: https://github.com/NVIDIA/Isaac-GR00T
 # Branch: n1.5-release
 # Path: gr00t/model/backbone/eagle2_hg_model/modeling_eagle2_5_vl.py
+# Modified from https://github.com/dexmal/realtime-vla/blob/main/pi0_infer.py
 
 import inspect
 from typing import List, Optional, Tuple, Union
@@ -20,14 +14,19 @@ from torch.nn import CrossEntropyLoss
 from transformers import GenerationConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from transformers.models.siglip.modeling_siglip import SiglipVisionModel
-from transformers.utils import add_start_docstrings
 
 from fluxvla.engines.utils.overwatch import initialize_overwatch
+from fluxvla.models.third_party_models.eagle2_hg_model.modeling_eagle2_5_vl import \
+    Eagle2_5_VLPreTrainedModel  # noqa: E501
+from fluxvla.ops import (combine_1536_1152_twopart, layer_norm_small_kernel,
+                         matmul_512x1152x1152_twopart_bias_res,
+                         matmul_small_bias, matmul_small_bias_gelu,
+                         matmul_small_bias_res, matmul_small_bias_res_mod,
+                         matmul_split_k, merge_split_k_bias_res)
 from .configuration_eagle2_5_vl import Eagle2_5_VLConfig
 from .radio_model import RADIOModel
 
@@ -51,42 +50,137 @@ EAGLE2_5_VL_START_DOCSTRING = r"""
 """
 
 
-@add_start_docstrings(
-    'The bare Eagle2_5_VL Model outputting raw hidden-states without any specific head on top.',  # noqa: E501
-    EAGLE2_5_VL_START_DOCSTRING,
-)
-class Eagle2_5_VLPreTrainedModel(PreTrainedModel):
-    config_class = Eagle2_5_VLConfig
-    base_model_prefix = 'model'
-    main_input_name = 'input_ids'
-    supports_gradient_checkpointing = True
-    _no_split_modules = [
-        'Qwen2DecoderLayer',
-        'LlamaDecoderLayer',
-        'Siglip2EncoderLayer',
-        'SiglipEncoderLayer',
-    ]
-    _skip_keys_device_placement = 'past_key_values'
-    _supports_flash_attn_2 = True
-    _supports_cache_class = True
-    _supports_static_cache = True
-    _supports_quantized_cache = True
-    _supports_sdpa = True
-
-    def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+def conv2d_embed_n256_1152_res(images, patch_w, patch_b, pos_emb, out):
+    nviews = images.shape[0]
+    img_input = images.view(nviews, 16, 14, 16, 14,
+                            3).permute(0, 1, 3, 2, 4, 5).contiguous()
+    matmul_small_bias_res_mod[(256 * nviews // 64) * (1152 // 64), ](
+        img_input,
+        patch_w,
+        out,
+        patch_b,
+        pos_emb,
+        seq_len=256 * nviews,
+        features=3 * 14 * 14,
+        hidden=1152,
+        i_mod=256,
+        BLOCK_SIZE_N=64,
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_K=32)
 
 
-class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
-                                          GenerationMixin):
+def layer_norm_QKV_matmul_n256_1152_3456_bias(x, norm_w, norm_b, qkv_w, qkv_b,
+                                              out, x_norm):
+    num_views = x.shape[0]
+    seq_len = 256 * num_views
+    layer_norm_small_kernel[seq_len, ](
+        x, x_norm, norm_w, norm_b, seq_len=seq_len, features=1152)
+
+    matmul_small_bias[((seq_len + 63) // 64) * (3456 // 64), ](
+        x_norm,
+        qkv_w,
+        out,
+        qkv_b,
+        seq_len=seq_len,
+        features=1152,
+        hidden=3456,
+        BLOCK_SIZE_N=64,
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_K=32)
+
+
+@torch.compile
+def AttnMultiKey(QKV):
+    QKV = QKV.view(-1, 256, 3, 16, 72).permute(0, 2, 3, 1, 4)
+    Q = QKV[:, 0]
+    K = QKV[:, 1]
+    V = QKV[:, 2]
+    attn = torch.nn.functional.scaled_dot_product_attention(Q, K, V)
+    attn = attn.transpose(1, 2).reshape(Q.shape[0], 256, 1152)
+    return attn
+
+
+def matmul_n256_1152_1152_bias_res(x, weight, bias, res, out, buf):
+    num_views = x.shape[0]
+    if num_views == 2:
+        matmul_512x1152x1152_twopart_bias_res[(256, )](
+            old_ptr=res,
+            inp_ptr=x,
+            weight_ptr=weight,
+            bias_ptr=bias,
+            out_ptr=out,
+            out2_ptr=buf,
+            seq_len=512,
+            features=1152,
+            hidden=1152,
+        )
+        combine_1536_1152_twopart[(256, )](
+            inp_ptr=buf,
+            out_ptr=out,
+            seq_len=512,
+            hidden=1152,
+        )
+        return
+    seq_len = 256 * num_views
+    matmul_small_bias_res[((seq_len + 31) // 32) * (1152 // 64), ](
+        x,
+        weight,
+        out,
+        bias,
+        res,
+        seq_len=seq_len,
+        features=1152,
+        hidden=1152,
+        BLOCK_SIZE_N=32,
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_K=32)
+
+
+def layer_norm_matmul_n256_1152_4304_bias_gelu(x, norm_w, norm_b, weight, bias,
+                                               out, x_norm):
+    num_views = x.shape[0]
+    seq_len = 256 * num_views
+
+    layer_norm_small_kernel[seq_len, ](
+        x, x_norm, norm_w, norm_b, seq_len=seq_len, features=1152)
+
+    BLOCK_SIZE_N = 64
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_K = 64
+    matmul_small_bias_gelu[((seq_len + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N) *
+                           ((4304 + (BLOCK_SIZE_M - 1)) // BLOCK_SIZE_M), ](
+                               x_norm,
+                               weight,
+                               out,
+                               bias,
+                               seq_len=seq_len,
+                               features=1152,
+                               hidden=4304,
+                               BLOCK_SIZE_N=BLOCK_SIZE_N,
+                               BLOCK_SIZE_M=BLOCK_SIZE_M,
+                               BLOCK_SIZE_K=BLOCK_SIZE_K)
+
+
+def matmul_n256_4304_1152_bias_res(x, weight, bias, res, out, buf):
+    num_views = x.shape[0]
+    seq_len = 256 * num_views
+    matmul_split_k[((seq_len + 64) // 64) * (1152 // 64) * 4, ](
+        x,
+        weight,
+        buf,
+        seq_len=seq_len,
+        features=4304,
+        hidden=1152,
+        BLOCK_SIZE_N=64,
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_K=64,
+        SPLIT_K=4)
+    merge_split_k_bias_res[(seq_len * 1152 + 1023) // 1024, ](
+        buf, bias, res, out, seq_len=seq_len, hidden=1152, SPLIT_K=4)
+
+
+class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
+                                                   GenerationMixin):
     config_class = Eagle2_5_VLConfig
 
     def __init__(self,
@@ -183,6 +277,46 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
 
         self.check_forward_kwargs()
 
+        self.weights = {
+            'vision_patch_embedding_w':
+            torch.empty(14, 14, 3, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_patch_embedding_b':
+            torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_position_embedding':
+            torch.empty(256, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_attn_qkv_w':
+            torch.empty(
+                27, 1152, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_attn_qkv_b':
+            torch.empty(27, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_attn_o_w':
+            torch.empty(27, 1152, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_attn_o_b':
+            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_ffn_up_w':
+            torch.empty(27, 1152, 4304, dtype=torch.bfloat16, device='cuda'),
+            'vision_ffn_up_b':
+            torch.empty(27, 4304, dtype=torch.bfloat16, device='cuda'),
+            'vision_ffn_down_w':
+            torch.empty(27, 4304, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_ffn_down_b':
+            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_pre_attn_norm_w':
+            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_pre_attn_norm_b':
+            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_pre_ffn_norm_w':
+            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_pre_ffn_norm_b':
+            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_final_norm_w':
+            torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_final_norm_b':
+            torch.empty(1152, dtype=torch.bfloat16, device='cuda')
+        }
+
+        self.loaded_weights = False
+
     def check_forward_kwargs(self):
         # We intentionally avoid using **kwargs in forward because Hugging Face Transformers  # noqa: E501
         # has special handling for functions with **kwargs parameters that would affect  # noqa: E501
@@ -229,6 +363,167 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         self.language_model.print_trainable_parameters()
         self.use_llm_lora = True
 
+    def _load_weights_and_buffer(self):
+        self.weights['vision_patch_embedding_w'].copy_(
+            self.vision_model.vision_model.embeddings.patch_embedding.weight.
+            permute(2, 3, 1, 0))
+        self.weights['vision_patch_embedding_b'].copy_(
+            self.vision_model.vision_model.embeddings.patch_embedding.bias)
+        self.weights['vision_position_embedding'].copy_(
+            self.vision_model.vision_model.embeddings.position_embedding.weight
+        )
+        self.weights['vision_attn_qkv_w'].copy_(
+            torch.stack([
+                torch.cat([
+                    self.vision_model.vision_model.encoder.layers[i].self_attn.
+                    q_proj.weight, self.vision_model.vision_model.encoder.
+                    layers[i].self_attn.k_proj.weight, self.vision_model.
+                    vision_model.encoder.layers[i].self_attn.v_proj.weight
+                ],
+                          dim=0).permute(1, 0) for i in range(27)
+            ]))
+        self.weights['vision_attn_qkv_b'].copy_(
+            torch.stack([
+                torch.cat([
+                    self.vision_model.vision_model.encoder.layers[i].self_attn.
+                    q_proj.bias, self.vision_model.vision_model.encoder.
+                    layers[i].self_attn.k_proj.bias, self.vision_model.
+                    vision_model.encoder.layers[i].self_attn.v_proj.bias
+                ],
+                          dim=0) for i in range(27)
+            ]))
+        self.weights['vision_attn_o_w'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].self_attn.
+                out_proj.weight.permute(1, 0) for i in range(27)
+            ]))
+        self.weights['vision_attn_o_b'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].self_attn.
+                out_proj.bias for i in range(27)
+            ]))
+        self.weights['vision_ffn_up_w'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].mlp.fc1.weight
+                for i in range(27)
+            ]).permute(0, 2, 1))
+        self.weights['vision_ffn_up_b'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].mlp.fc1.bias
+                for i in range(27)
+            ]))
+        self.weights['vision_ffn_down_w'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].mlp.fc2.weight
+                for i in range(27)
+            ]).permute(0, 2, 1))
+        self.weights['vision_ffn_down_b'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].mlp.fc2.bias
+                for i in range(27)
+            ]))
+        self.weights['vision_pre_attn_norm_w'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].layer_norm1.
+                weight for i in range(27)
+            ]))
+        self.weights['vision_pre_attn_norm_b'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].layer_norm1.
+                bias for i in range(27)
+            ]))
+        self.weights['vision_pre_ffn_norm_w'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].layer_norm2.
+                weight for i in range(27)
+            ]))
+        self.weights['vision_pre_ffn_norm_b'].copy_(
+            torch.stack([
+                self.vision_model.vision_model.encoder.layers[i].layer_norm2.
+                bias for i in range(27)
+            ]))
+        self.weights['vision_final_norm_w'].copy_(
+            self.vision_model.vision_model.post_layernorm.weight)
+        self.weights['vision_final_norm_b'].copy_(
+            self.vision_model.vision_model.post_layernorm.bias)
+        num_views = 2
+        self.buffers = {
+            'observation_images_normalized':
+            torch.empty(
+                num_views, 224, 224, 3, dtype=torch.bfloat16, device='cuda'),
+            'vision_x':
+            torch.empty(
+                num_views, 256, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_x_norm':
+            torch.empty(
+                num_views, 256, 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_QKV':
+            torch.empty(
+                num_views, 256, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            'vision_hidden':
+            torch.empty(
+                num_views, 256, 4304, dtype=torch.bfloat16, device='cuda'),
+            'vision_x_split_k_buf':
+            torch.empty((num_views * 256 * 1152 * 4, ),
+                        dtype=torch.float32,
+                        device='cuda')
+        }
+
+        # Initialize vision CUDA Graph
+        self.vision_graph = torch.cuda.CUDAGraph()
+        self.record_vision_graph()
+
+    def record_vision_run(self):
+        """Core vision encoder computation for CUDA Graph capture."""
+        conv2d_embed_n256_1152_res(
+            self.buffers['observation_images_normalized'],
+            self.weights['vision_patch_embedding_w'],
+            self.weights['vision_patch_embedding_b'],
+            self.weights['vision_position_embedding'],
+            self.buffers['vision_x'])
+
+        for i in range(27):
+            layer_norm_QKV_matmul_n256_1152_3456_bias(
+                self.buffers['vision_x'],
+                self.weights['vision_pre_attn_norm_w'][i],
+                self.weights['vision_pre_attn_norm_b'][i],
+                self.weights['vision_attn_qkv_w'][i],
+                self.weights['vision_attn_qkv_b'][i],
+                self.buffers['vision_QKV'], self.buffers['vision_x_norm'])
+
+            attn = AttnMultiKey(self.buffers['vision_QKV'])
+
+            matmul_n256_1152_1152_bias_res(
+                attn, self.weights['vision_attn_o_w'][i],
+                self.weights['vision_attn_o_b'][i], self.buffers['vision_x'],
+                self.buffers['vision_x'], self.buffers['vision_x_split_k_buf'])
+
+            layer_norm_matmul_n256_1152_4304_bias_gelu(
+                self.buffers['vision_x'],
+                self.weights['vision_pre_ffn_norm_w'][i],
+                self.weights['vision_pre_ffn_norm_b'][i],
+                self.weights['vision_ffn_up_w'][i],
+                self.weights['vision_ffn_up_b'][i],
+                self.buffers['vision_hidden'], self.buffers['vision_x_norm'])
+
+            matmul_n256_4304_1152_bias_res(
+                self.buffers['vision_hidden'],
+                self.weights['vision_ffn_down_w'][i],
+                self.weights['vision_ffn_down_b'][i], self.buffers['vision_x'],
+                self.buffers['vision_x'], self.buffers['vision_x_split_k_buf'])
+
+    def record_vision_graph(self):
+        """Record vision encoder computation into CUDA Graph."""
+        # Warm-up runs
+        for i in range(3):
+            self.record_vision_run()
+        # Capture CUDA Graph
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            self.vision_graph.capture_begin()
+            self.record_vision_run()
+            self.vision_graph.capture_end()
+
     def forward(
         self,
         pixel_values: torch.FloatTensor,
@@ -244,6 +539,10 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         return_dict: Optional[bool] = None,
         num_tiles_list: Optional[List[torch.Tensor]] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        if not self.loaded_weights:
+            self._load_weights_and_buffer()
+            self.loaded_weights = True
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict  # noqa: E501
 
         input_embeds = self.language_model.get_input_embeddings()(input_ids)
@@ -325,29 +624,16 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         return x
 
     def extract_feature(self, pixel_values):
-        if self.select_layer == -1:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=False,
-                return_dict=True)
-            if hasattr(vit_embeds, 'last_hidden_state'):
-                vit_embeds = vit_embeds.last_hidden_state
+        # Convert from NCHW [B, C, H, W] to NHWC [B, H, W, C] for CUDA kernel
+        self.buffers['observation_images_normalized'].copy_(
+            pixel_values.permute(0, 2, 3, 1))
 
-        else:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=True,
-                return_dict=True).hidden_states[self.select_layer]
+        # Replay CUDA Graph for vision encoder
+        self.vision_graph.replay()
 
-        if self.use_pixel_shuffle:
-            h = w = int(vit_embeds.shape[1]**0.5)
-            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-            vit_embeds = self.pixel_shuffle(
-                vit_embeds, scale_factor=self.downsample_ratio
-            )  # torch.Size([B, 1024, 1024]) -> torch.Size([B, 16, 16, 4096])
-            vit_embeds = vit_embeds.reshape(
-                vit_embeds.shape[0], -1, vit_embeds.shape[-1]
-            )  # torch.Size([B, 16, 16, 4096]) -> torch.Size([B, 256, 4096])
+        # Post-processing (not in CUDA Graph due to checkpoint compatibility)
+        vit_embeds = self.vision_model.vision_model.post_layernorm(
+            self.buffers['vision_x'])
 
         if self.mlp_checkpoint and vit_embeds.requires_grad:
             vit_embeds = cp.checkpoint(self.mlp1, vit_embeds)

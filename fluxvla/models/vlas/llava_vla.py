@@ -199,7 +199,7 @@ class LlavaVLA(OpenVLA):
                     'Output must contain either hidden_states or last_hidden_state.'  # noqa: E501
                 last_hidden_state = output['last_hidden_state']
         pred_actions = self.vla_head.predict_action(
-            input_features=last_hidden_state.float(),
+            input_features=last_hidden_state,
             states=states,
             attention_mask=fused_attention_mask,
             embodiment_ids=embodiment_ids)
