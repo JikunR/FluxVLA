@@ -18,6 +18,7 @@ model = dict(
     './checkpoints/GR00T-N1.5-3B',
     vlm_backbone=dict(
         type='EagleBackbone',
+        dtype='bf16',
         vlm_path=  # noqa: E251
         'fluxvla/models/third_party_models/eagle2_hg_model'),
     vla_head=dict(
@@ -47,7 +48,7 @@ inference_model = dict(
         vlm_path=  # noqa: E251
         'fluxvla/models/third_party_models/eagle2_hg_model'),
     vla_head=dict(
-        type='FlowMatchingHead',
+        type='FlowMatchingInferenceHead',
         state_dim=64,
         hidden_size=1024,
         input_embedding_dim=1536,
@@ -75,6 +76,7 @@ train_dataloader = dict(
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
+        seed=7,
         name_mappings={
             'observation.state': ['proprio'],
             'action': ['action']

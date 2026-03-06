@@ -22,6 +22,7 @@ import torch
 
 from fluxvla.engines.utils.torch_utils import set_seed_everywhere
 from ..utils import build_operator_from_cfg, initialize_overwatch
+from ..utils.name_map import str_to_dtype
 
 overwatch = initialize_overwatch(__name__)
 
@@ -54,7 +55,9 @@ class BaseInferenceRunner:
                  camera_names: Optional[List[str]] = None,
                  operator: Dict = None,
                  task_descriptions: Dict = None,
-                 task_pose_sequences: Dict = None):
+                 task_pose_sequences: Dict = None,
+                 mixed_precision_dtype: str = 'float32',
+                 enable_mixed_precision: bool = True):
         """Initialize the base inference runner.
 
         Args:
@@ -144,6 +147,10 @@ class BaseInferenceRunner:
         self.task_descriptions = task_descriptions or {}
         self.task_pose_sequences = task_pose_sequences or {}
 
+        # Mixed precision settings
+        self.mixed_precision_dtype = str_to_dtype(mixed_precision_dtype)
+        self.enable_mixed_precision = enable_mixed_precision
+
     def _apply_jpeg_compression(self, img: np.ndarray) -> np.ndarray:
         """Apply JPEG compression and decompression to image.
 
@@ -198,9 +205,13 @@ class BaseInferenceRunner:
         """
         set_seed_everywhere(self.seed)
         self.vla.eval()
-        self.vla.cuda()
-        overwatch.info(
-            f'Model loaded and moved to GPU. Seed set to {self.seed}')
+        if self.enable_mixed_precision:
+            self.vla.to(device='cuda', dtype=self.mixed_precision_dtype)
+        else:
+            self.vla.cuda()
+        overwatch.info(f'Model loaded and moved to GPU '
+                       f'(dtype={self.mixed_precision_dtype}). '
+                       f'Seed set to {self.seed}')
 
     def run(self,
             initial_instruction:
@@ -254,8 +265,11 @@ class BaseInferenceRunner:
                 obs['task_description'] = instruction
                 inputs = self.dataset(obs)
 
-                # Predict actions using VLA model
-                actions = self.vla.predict_action(**inputs)
+                with torch.autocast(
+                        'cuda',
+                        dtype=self.mixed_precision_dtype,
+                        enabled=self.enable_mixed_precision):
+                    actions = self.vla.predict_action(**inputs)
                 raw_action = actions
 
                 # Denormalize actions to robot command space
