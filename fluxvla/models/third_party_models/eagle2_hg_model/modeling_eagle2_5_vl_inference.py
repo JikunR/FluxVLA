@@ -7,11 +7,12 @@ import inspect
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 from peft import LoraConfig, get_peft_model
 from torch import nn
-from torch.nn import CrossEntropyLoss
 from transformers import GenerationConfig
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
@@ -179,6 +180,86 @@ def matmul_n256_4304_1152_bias_res(x, weight, bias, res, out, buf):
         buf, bias, res, out, seq_len=seq_len, hidden=1152, SPLIT_K=4)
 
 
+def qwen3_rmsnorm(hidden_states, weight, eps):
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + eps)
+    return weight * hidden_states.to(input_dtype)
+
+
+def rotate_half(x):
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+def qwen3_attn(hidden_states, cos, sin, attention_mask, position_ids, head_dim,
+               num_kv_groups, q_w, k_w, v_w, o_w, q_norm_w, k_norm_w, eps,
+               attn_implementation):
+    input_shape = hidden_states.shape[:-1]
+    hidden_shape = (*input_shape, -1, head_dim)
+    query_states = qwen3_rmsnorm(
+        F.linear(hidden_states, q_w).view(hidden_shape), q_norm_w,
+        eps).transpose(1, 2)
+    key_states = qwen3_rmsnorm(
+        F.linear(hidden_states, k_w).view(hidden_shape), k_norm_w,
+        eps).transpose(1, 2)
+    value_states = F.linear(hidden_states,
+                            v_w).view(hidden_shape).transpose(1, 2)
+
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
+                                                    cos, sin)
+
+    key_states = key_states.repeat_interleave(num_kv_groups, dim=1)
+    value_states = value_states.repeat_interleave(num_kv_groups, dim=1)
+
+    attn_output = F.scaled_dot_product_attention(
+        query_states, key_states, value_states, attn_mask=attention_mask)
+
+    # sdpa returns (B, H, S, D), transpose then reshape to (B, S, H*D)
+    attn_output = attn_output.transpose(1, 2).reshape(*input_shape,
+                                                      -1).contiguous()
+    attn_output = F.linear(attn_output, o_w)
+    return attn_output
+
+
+def qwen3_mlp(hidden_states, gate_w, up_w, down_w):
+    return F.linear(
+        F.silu(F.linear(hidden_states, gate_w)) *
+        F.linear(hidden_states, up_w), down_w)
+
+
+def qwen3_decoder_layer(hidden_states, cos, sin, attention_mask, position_ids,
+                        head_dim, num_kv_groups, eps, input_layernorm_w,
+                        post_attn_layernorm_w, q_w, k_w, v_w, o_w, q_norm_w,
+                        k_norm_w, gate_w, up_w, down_w, attn_implementation):
+    residual = hidden_states
+    hidden_states = qwen3_rmsnorm(hidden_states, input_layernorm_w, eps)
+    hidden_states = qwen3_attn(hidden_states, cos, sin, attention_mask,
+                               position_ids, head_dim, num_kv_groups, q_w, k_w,
+                               v_w, o_w, q_norm_w, k_norm_w, eps,
+                               attn_implementation)
+    hidden_states = residual + hidden_states
+
+    # Fully Connected
+    residual = hidden_states
+    hidden_states = qwen3_rmsnorm(hidden_states, post_attn_layernorm_w, eps)
+    hidden_states = qwen3_mlp(hidden_states, gate_w, up_w, down_w)
+    hidden_states = residual + hidden_states
+
+    # hidden_states = residual + hidden_states
+    return hidden_states
+
+
 class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
                                                    GenerationMixin):
     config_class = Eagle2_5_VLConfig
@@ -312,7 +393,31 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
             'vision_final_norm_w':
             torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
             'vision_final_norm_b':
-            torch.empty(1152, dtype=torch.bfloat16, device='cuda')
+            torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_q_w':
+            torch.empty(12, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_k_w':
+            torch.empty(12, 1024, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_v_w':
+            torch.empty(12, 1024, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_o_w':
+            torch.empty(12, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_q_norm_w':
+            torch.empty(12, 128, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_k_norm_w':
+            torch.empty(12, 128, dtype=torch.bfloat16, device='cuda'),
+            'language_gate_proj_w':
+            torch.empty(12, 6144, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_up_proj_w':
+            torch.empty(12, 6144, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_down_proj_w':
+            torch.empty(12, 2048, 6144, dtype=torch.bfloat16, device='cuda'),
+            'language_input_layernorm_w':
+            torch.empty(12, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_post_attn_layernorm_w':
+            torch.empty(12, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_norm_w':
+            torch.empty(2048, dtype=torch.bfloat16, device='cuda'),
         }
 
         self.loaded_weights = False
@@ -363,7 +468,7 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         self.language_model.print_trainable_parameters()
         self.use_llm_lora = True
 
-    def _load_weights_and_buffer(self):
+    def _load_weights_and_buffer(self, num_views):
         self.weights['vision_patch_embedding_w'].copy_(
             self.vision_model.vision_model.embeddings.patch_embedding.weight.
             permute(2, 3, 1, 0))
@@ -446,7 +551,64 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
             self.vision_model.vision_model.post_layernorm.weight)
         self.weights['vision_final_norm_b'].copy_(
             self.vision_model.vision_model.post_layernorm.bias)
-        num_views = 2
+
+        self.weights['language_attn_q_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].self_attn.q_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_attn_k_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].self_attn.k_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_attn_v_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].self_attn.v_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_attn_o_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].self_attn.o_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_attn_q_norm_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].self_attn.q_norm.weight
+                for i in range(12)
+            ]))
+        self.weights['language_attn_k_norm_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].self_attn.k_norm.weight
+                for i in range(12)
+            ]))
+        self.weights['language_gate_proj_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].mlp.gate_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_up_proj_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].mlp.up_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_down_proj_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].mlp.down_proj.weight
+                for i in range(12)
+            ]))
+        self.weights['language_input_layernorm_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].input_layernorm.weight
+                for i in range(12)
+            ]))
+        self.weights['language_post_attn_layernorm_w'].copy_(
+            torch.stack([
+                self.language_model.model.layers[i].post_attention_layernorm.
+                weight for i in range(12)
+            ]))
+        self.weights['language_norm_w'].copy_(
+            self.language_model.model.norm.weight)
         self.buffers = {
             'observation_images_normalized':
             torch.empty(
@@ -466,12 +628,34 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
             'vision_x_split_k_buf':
             torch.empty((num_views * 256 * 1152 * 4, ),
                         dtype=torch.float32,
-                        device='cuda')
+                        device='cuda'),
+            'language_x':
+            torch.empty(1, 600, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_x_norm':
+            torch.empty(1, 600, 2048, dtype=torch.bfloat16, device='cuda'),
+            'language_QKV':
+            torch.empty(1, 256, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            'language_hidden':
+            torch.empty(1, 256, 4304, dtype=torch.bfloat16, device='cuda'),
+            'language_x_split_k_buf':
+            torch.empty((1 * 256 * 1152 * 4, ),
+                        dtype=torch.float32,
+                        device='cuda'),
+            'language_cos':
+            torch.empty(1, 600, 128, dtype=torch.bfloat16, device='cuda'),
+            'language_sin':
+            torch.empty(1, 600, 128, dtype=torch.bfloat16, device='cuda'),
+            'position_ids':
+            torch.empty(1, 600, dtype=torch.long, device='cuda'),
+            'attention_mask':
+            torch.empty(1, 1, 600, 600, dtype=torch.bfloat16, device='cuda')
         }
 
         # Initialize vision CUDA Graph
         self.vision_graph = torch.cuda.CUDAGraph()
+        self.language_graph = torch.cuda.CUDAGraph()
         self.record_vision_graph()
+        self.record_language_graph()
 
     def record_vision_run(self):
         """Core vision encoder computation for CUDA Graph capture."""
@@ -524,6 +708,48 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
             self.record_vision_run()
             self.vision_graph.capture_end()
 
+    def record_language_graph(self):
+        """Record language encoder computation into CUDA Graph."""
+        # Warm-up runs
+        for i in range(3):
+            self.record_language_run()
+        # Capture CUDA Graph
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            self.language_graph.capture_begin()
+            self.record_language_run()
+            self.language_graph.capture_end()
+
+    def record_language_run(self):
+        """Core language encoder computation for CUDA Graph capture."""
+        eps = self.config.text_config.rms_norm_eps
+        head_dim = self.config.text_config.head_dim
+        num_kv_groups = (
+            self.config.text_config.num_attention_heads //
+            self.config.text_config.num_key_value_heads)
+        num_layers = len(self.language_model.model.layers)
+        for i in range(num_layers):
+            hidden_states = qwen3_decoder_layer(
+                self.buffers['language_x'], self.buffers['language_cos'],
+                self.buffers['language_sin'], self.buffers['attention_mask'],
+                self.buffers['position_ids'], head_dim, num_kv_groups, eps,
+                self.weights['language_input_layernorm_w'][i],
+                self.weights['language_post_attn_layernorm_w'][i],
+                self.weights['language_attn_q_w'][i],
+                self.weights['language_attn_k_w'][i],
+                self.weights['language_attn_v_w'][i],
+                self.weights['language_attn_o_w'][i],
+                self.weights['language_attn_q_norm_w'][i],
+                self.weights['language_attn_k_norm_w'][i],
+                self.weights['language_gate_proj_w'][i],
+                self.weights['language_up_proj_w'][i],
+                self.weights['language_down_proj_w'][i],
+                self.config.text_config._attn_implementation)
+            self.buffers['language_x'].copy_(hidden_states)
+        self.buffers['language_x'].copy_(
+            qwen3_rmsnorm(self.buffers['language_x'],
+                          self.weights['language_norm_w'], eps))
+
     def forward(
         self,
         pixel_values: torch.FloatTensor,
@@ -539,15 +765,16 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         return_dict: Optional[bool] = None,
         num_tiles_list: Optional[List[torch.Tensor]] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        num_views = pixel_values.shape[0]
         if not self.loaded_weights:
-            self._load_weights_and_buffer()
+            self._load_weights_and_buffer(num_views)
             self.loaded_weights = True
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict  # noqa: E501
 
         input_embeds = self.language_model.get_input_embeddings()(input_ids)
 
-        vit_embeds = self.extract_feature(pixel_values)
+        vit_embeds = self.extract_vision_feature(pixel_values)
 
         if image_flags is not None:
             image_flags = image_flags.view(-1)
@@ -572,43 +799,15 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
                 selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
 
         input_embeds = input_embeds.reshape(B, N, C)
-
-        outputs = self.language_model(
-            inputs_embeds=input_embeds,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-        )
-        logits = outputs.logits
-
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(
-                -1, self.language_model.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
-        if not return_dict:
-            output = (logits, ) + outputs[1:]
-            return (loss, ) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+        if use_cache is None:
+            use_cache = self.language_model.config.use_cache
+        outputs = self.extract_language_feature(
+            input_embeds,
+            position_ids,  # noqa: E501
+            past_key_values,
+            use_cache,  # noqa: E501
+            attention_mask)
+        return outputs
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -623,7 +822,7 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    def extract_feature(self, pixel_values):
+    def extract_vision_feature(self, pixel_values):
         # Convert from NCHW [B, C, H, W] to NHWC [B, H, W, C] for CUDA kernel
         self.buffers['observation_images_normalized'].copy_(
             pixel_values.permute(0, 2, 3, 1))
@@ -642,6 +841,55 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
 
         return vit_embeds
 
+    def extract_language_feature(self,
+                                 inputs_embeds,
+                                 position_ids,
+                                 past_key_values,
+                                 use_cache,
+                                 attention_mask,
+                                 cache_position=None):
+
+        self.buffers['language_x'].copy_(inputs_embeds)
+        if not isinstance(past_key_values, (type(None), Cache)):
+            raise ValueError(
+                'The `past_key_values` should be either a `Cache` object or `None`.'  # noqa: E501
+            )
+
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length(
+            ) if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device)
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+        position_embeddings = self.language_model.model.rotary_emb(
+            inputs_embeds, position_ids)
+        self.buffers['language_cos'].copy_(position_embeddings[0])
+        self.buffers['language_sin'].copy_(position_embeddings[1])
+
+        # Build 4D causal+padding additive mask outside CUDA graph
+        # attention_mask: (B, S) bool/int -> combined 4D: (B, 1, S, S)
+        seq_len = attention_mask.shape[1]
+        causal_mask = torch.tril(
+            torch.ones(
+                seq_len,
+                seq_len,
+                device=attention_mask.device,
+                dtype=torch.bool))
+        padding_mask = attention_mask[:, None, None, :].bool()
+        combined = causal_mask[None, None, :, :] & padding_mask
+        self.buffers['attention_mask'].copy_(
+            torch.where(combined, 0.0, float('-inf')).to(torch.bfloat16))
+
+        self.language_graph.replay()
+        return self.buffers['language_x']
+
     @torch.no_grad()
     def generate(
         self,
@@ -654,12 +902,12 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         image_sizes: Optional[List[Tuple[int, int]]] = None,
         **generate_kwargs,
     ) -> torch.LongTensor:
-
+        generation_config = GenerationConfig(max_new_tokens=100)
         if pixel_values is not None:
             if visual_features is not None:
                 vit_embeds = visual_features
             else:
-                vit_embeds = self.extract_feature(pixel_values)
+                vit_embeds = self.extract_vision_feature(pixel_values)
 
             input_embeds = self.language_model.get_input_embeddings()(
                 input_ids)

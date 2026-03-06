@@ -194,6 +194,10 @@ class EagleInferenceBackbone(nn.Module):
             Defaults to None.
     """
 
+    # FlashAttention only supports fp16/bf16; when model params are fp32,
+    # we need to autocast to this dtype automatically.
+    _flash_attn_autocast_dtype = torch.bfloat16
+
     def __init__(self,
                  vlm_path: str,
                  vlm_config: Dict = None,
@@ -241,32 +245,19 @@ class EagleInferenceBackbone(nn.Module):
 
         self.select_layer = select_layer
         self.config = config
-
-    def prepare_input(self, batch: dict) -> BatchFeature:
-        return BatchFeature(data=batch)
+        self._uses_flash_attn = (
+            getattr(config, '_attn_implementation',
+                    None) == 'flash_attention_2')
 
     @property
-    def transformer_layer_cls(self) -> Type[nn.Module]:
-        return Qwen3DecoderLayer
-
-    def forward_eagle(self, vl_input: BatchFeature) -> BatchFeature:
-        eagle_prefix = 'eagle_'
-        eagle_input = {
-            k.removeprefix(eagle_prefix): v
-            for k, v in vl_input.items() if k.startswith(eagle_prefix)
-        }
-        del eagle_input['image_sizes']
-
-        eagle_output = self.vlm(
-            **eagle_input,
-            output_hidden_states=True,
-            return_dict=True,
-            use_cache=True,
-            torch_dtype=self.dtype)
-        eagle_features = eagle_output.hidden_states[self.select_layer]
-
-        eagle_features = self.eagle_linear(eagle_features)
-        return eagle_features, eagle_input['attention_mask']
+    def _needs_autocast(self) -> bool:
+        """Check if autocast is needed for FlashAttention compatibility."""
+        if not self._uses_flash_attn:
+            return False
+        param = next(self.parameters(), None)
+        if param is None:
+            return False
+        return param.dtype not in (torch.float16, torch.bfloat16)
 
     def forward(self,
                 images: List[torch.Tensor],
@@ -276,46 +267,25 @@ class EagleInferenceBackbone(nn.Module):
                 *args,
                 **kwargs) -> BatchFeature:
 
-        vlm_output = self.vlm(
-            input_ids=lang_tokens,
-            attention_mask=lang_masks,
-            pixel_values=images.reshape(
-                (images.shape[0] * images.shape[1] // 3, 3, images.shape[2],
-                 images.shape[3])),
-            output_hidden_states=True,
-            return_dict=True)
+        pixel_values = images.reshape((images.shape[0] * images.shape[1] // 3,
+                                       3, images.shape[2], images.shape[3]))
 
-        # YL (TODO HACK): to resolve DDP issue when tune_visual=True
-        # Ensure all trainable parameters in vision_model are used
-        # in the forward pass for DDP compatibility
-        eagle_features = vlm_output.hidden_states[self.select_layer]
+        if self._needs_autocast:
+            with torch.autocast(
+                    device_type='cuda', dtype=self._flash_attn_autocast_dtype):
+                eagle_features = self.vlm(
+                    input_ids=lang_tokens,
+                    attention_mask=lang_masks,
+                    pixel_values=pixel_values,
+                    output_hidden_states=True,
+                    return_dict=True)
+        else:
+            eagle_features = self.vlm(
+                input_ids=lang_tokens,
+                attention_mask=lang_masks,
+                pixel_values=pixel_values,
+                output_hidden_states=True,
+                return_dict=True)
 
         eagle_features = self.eagle_linear(eagle_features)
         return eagle_features, lang_masks, None
-
-    def enable_gradient_checkpointing(self) -> None:
-        """
-        Enables gradient checkpointing on the underlying Qwen3 LLM model.
-        Uses HuggingFace's built-in gradient checkpointing mechanism.
-        """
-        # Use use_reentrant=False for better compatibility with FSDP
-        gradient_checkpointing_kwargs = {'use_reentrant': False}
-        if hasattr(self.vlm, 'language_model'):
-            self.vlm.language_model.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
-        elif hasattr(self.vlm, 'gradient_checkpointing_enable'):
-            self.vlm.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
-
-    def get_fsdp_wrapping_policy(self) -> Callable:
-        """
-        Returns a function used to determine which modules to wrap with FSDP.
-
-        Returns:
-            Callable: Wrapping policy function.
-        """
-        transformer_block_policy = partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls={Qwen3Attention, Qwen3MLP},
-        )
-        return transformer_block_policy
