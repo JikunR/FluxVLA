@@ -78,10 +78,9 @@ class URInferenceRunner(BaseInferenceRunner):
 
         # Initialize UR-specific poses
         self.prepare_pose = [
-            0.27977497403850615, -0.09817463773080465, 0.32509494366091285,
-            -0.3981905518308301, 0.9165224618443958, -0.03706370318236536,
-            0.007559317016551241
-        ]
+            2.3911736011505127, -1.7057769934283655, 2.1696739196777344,
+            -0.5096147696124476, 1.5789384841918945, -15.709390354140687
+        ]  # horizontal, joint angles
 
     def get_ros_observation(
             self) -> Tuple[np.ndarray, np.ndarray, 'JointState',  # noqa: F821
@@ -184,7 +183,7 @@ class URInferenceRunner(BaseInferenceRunner):
 
     def _move_to_prepare_pose(self):
         """Move robot to predefined preparation pose."""
-        self.ros_operator.movel(self.prepare_pose)
+        self.ros_operator.movej(self.prepare_pose)
         self.ros_operator.movegrip(0.085)  # Open gripper
 
     def execute_task_pose(self, task_id: str):

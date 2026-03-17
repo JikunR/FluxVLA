@@ -189,7 +189,7 @@ train_dataloader = dict(
                     tokenizer=dict(
                         type='PretrainedTokenizer',
                         model_path=  # noqa: E251
-                        '/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-VL-3B-Instruct',  # noqa: E501
+                        './checkpoints/Qwen2.5-VL-3B-Instruct',
                         # special_tokens={'pad_token': '<PAD>'}
                     )),
                 dict(type='ResizeImages', height=224, width=224),
@@ -276,7 +276,7 @@ eval = dict(
                 tokenizer=dict(
                     type='PretrainedTokenizer',
                     model_path=  # noqa: E251
-                    '/limx/tos/limx_mani_checkpoints/open_source/Qwen2.5-VL-3B-Instruct',  # noqa: E501
+                    './checkpoints/Qwen2.5-VL-3B-Instruct',
                     # special_tokens={'pad_token': '<PAD>'}
                 )),
             dict(

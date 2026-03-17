@@ -490,9 +490,9 @@ class UROperator:
         self.movel_pub = rospy.Publisher('/cmd/movel', Pose, queue_size=10)
         self.servoj_pub = rospy.Publisher(
             '/cmd/servoj', JointState, queue_size=10)
-        self.movej_pub = rospy.Publisher('/cmd/movej', Pose, queue_size=10)
-        self.servol_pub = rospy.Publisher(
-            '/cmd/servol', JointState, queue_size=10)
+        self.movej_pub = rospy.Publisher(
+            '/cmd/movej', JointState, queue_size=10)
+        self.servol_pub = rospy.Publisher('/cmd/servol', Pose, queue_size=10)
         self.movegrip_pub = rospy.Publisher(
             '/cmd/gripper', Float32, queue_size=10)
 

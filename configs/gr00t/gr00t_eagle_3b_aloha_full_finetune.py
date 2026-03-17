@@ -42,7 +42,7 @@ model = dict(
 inference_model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=  # noqa: E251
-    '/limx/tos/users/liyinhao/projects/GR00T-N1.5-3B',
+    './checkpoints/GR00T-N1.5-3B',
     vlm_backbone=dict(
         type='EagleBackbone',
         dtype=None,
@@ -81,7 +81,7 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    './datasets/RealRobot_AgileX_aloha_lerobot_v2/20250601_20250615_02_4090',  # noqa: E501
+                    './datasets/RealRobot_AgileX_aloha_lerobot_v2/aloha_example',  # noqa: E501
                 ],
                 transforms=[
                     dict(
@@ -106,7 +106,7 @@ train_dataloader = dict(
                         tokenizer=dict(
                             type='PretrainedTokenizer',
                             model_path=  # noqa: E251
-                            '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+                            'fluxvla/models/third_party_models/eagle2_hg_model',  # noqa: E501
                             # special_tokens={'pad_token': '<PAD>'}
                         )),
                     dict(type='ResizeImages', height=224, width=224),
@@ -140,7 +140,7 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+        'fluxvla/models/third_party_models/eagle2_hg_model',
         # special_tokens={'pad_token': '<PAD>'}
     ),
     collator=dict(
@@ -168,45 +168,18 @@ inference = dict(
     type='AlohaInferenceRunner',
     seed=7,
     task_descriptions={
-        '1': 'place it on the blue plate with right arm',
-        '2': 'pick up the green bowl with right arm',
-        '3': 'place it on the green bowl with left arm',
-        '4': 'pick up the green bowl with left arm',
-        '5': 'pick up the blue bowl with right arm',
-        '6': 'place it on the red plate with left arm',
-        '7': 'place it on the blue bowl with right arm',
-        '8': 'pick up the yellow bowl with left arm',
-        '9':
-        'pull in opposite directions to open the brown paper bag with both arms',  # noqa: E501
-        '10':
-        'grasp the bottom edge of the brown paper bag with right arm',  # noqa: E501
-        '11': 'let it drop onto the table by opening both grippers',
-        '12': 'pick up the golden chocolate ball with right arm',
-        '13': 'place it in the brown paper bag with right arm',
-        '14': 'pick up the tiger toy with right arm',
-        '15': 'pick up the robot dog toy with right arm',
-        '16':
-        'grasp the upper edge of the brown paper bag with left arm',  # noqa: E501
-        '17': 'pick up the shuttlecock with right arm',
-        '18': 'pick up the yellow bowl with right arm',
-        '19': 'place it on the yellow bowl with left arm',
-        '20': 'pick up the giraffe toy with right arm',
-        '21': 'pick up the zebra toy with right arm',
-        '22': 'pick up the basketball toy with right arm',
-        '23': 'place it in the paper bag with right arm',
-        '24': 'place it on the green plate with left arm',
-        '25': 'pick up the red bowl with left arm',
-        '26': 'place it on the red bowl with left arm',
-        '27': 'place it on the blue bowl with left arm',
-        '28': 'place it on the red plate with right arm',
-        '29': 'place it on the yellow bowl with right arm',
-        '30': 'place it on the blue plate with left arm',
-        '31': 'hold open the brown paper bag with left arm',
-        '32': 'pick up the blue bowl with left arm',
-        '33': 'place it on the green bowl with right arm',
-        '34': 'place it on the green plate with right arm',
-        '35': 'pick up the red bowl with right arm'
+        '1': 'pick up the brown bird toy with left arm',
+        '2': 'pick up the brown bird toy with right arm',
+        '3': 'pick up the pruple knitted teddy bear toy with left arm',
+        '4': 'pick up the purple knitted teddy bear toy with right arm',
+        '5': 'pick up the white racing car toy with left arm',
+        '6': 'pick up the white racing car toy with right arm',
+        '7': 'pick up the pruple caterpillar toy with left arm',
+        '8': 'pick up the pruple caterpillar toy with right arm',
+        '9': 'place it in the brown flat cardboard box with left arm',
+        '10': 'place it in the brown flat cardboard box with right arm',
     },
+    mixed_precision_dtype='bf16',
     dataset=dict(
         type='PrivateInferenceDataset',
         embodiment_id=0,

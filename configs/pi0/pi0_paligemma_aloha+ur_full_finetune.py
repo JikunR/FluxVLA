@@ -143,7 +143,7 @@ train_dataloader = dict(
                     type='ParquetDataset',
                     data_root_path=  # noqa: E251
                     [
-                        './datasets/RealRobot_AgileX_aloha_lerobot_v2/20250601_20250615_02_4090'  # noqa: E501
+                        './datasets/RealRobot_AgileX_aloha_lerobot_v2/aloha_example'  # noqa: E501
                     ],
                     transforms=[
                         dict(
@@ -170,7 +170,7 @@ train_dataloader = dict(
                             tokenizer=dict(
                                 type='PretrainedTokenizer',
                                 model_path=  # noqa: E251
-                                'checkpoints/paligemma-3b-pt-224',  # noqa: E501
+                                'checkpoints/pi0_base',  # noqa: E501
                                 # special_tokens={'pad_token': '<PAD>'}
                             )),
                         dict(type='ResizeImages', height=224, width=224),
@@ -198,7 +198,7 @@ train_dataloader = dict(
                     type='ParquetDataset',
                     data_root_path=  # noqa: E251
                     [
-                        './datasets/RealRobot_UR3_Chem_lerobot_v2/20251204_20251205_01'  # noqa: E501
+                        './datasets/RealRobot_UR3_Chem_lerobot_v2/ur3_example'  # noqa: E501
                     ],
                     transforms=[
                         dict(
@@ -225,7 +225,7 @@ train_dataloader = dict(
                             tokenizer=dict(
                                 type='PretrainedTokenizer',
                                 model_path=  # noqa: E251
-                                'checkpoints/paligemma-3b-pt-224',  # noqa: E501
+                                'checkpoints/pi0_base',  # noqa: E501
                                 # special_tokens={'pad_token': '<PAD>'}
                             )),
                         dict(type='ResizeImages', height=224, width=224),
