@@ -80,7 +80,7 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    './datasets/RealRobot_UR3_Chem_lerobot_v2/20251204_20251205_01',  # noqa: E501
+                    './datasets/RealRobot_UR3_Chem_lerobot_v2/ur3_example',  # noqa: E501
                 ],
                 transforms=[
                     dict(
@@ -104,7 +104,7 @@ train_dataloader = dict(
                         tokenizer=dict(
                             type='PretrainedTokenizer',
                             model_path=  # noqa: E251
-                            '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+                            'fluxvla/models/third_party_models/eagle2_hg_model',  # noqa: E501
                             # special_tokens={'pad_token': '<PAD>'}
                         )),
                     dict(type='ResizeImages', height=224, width=224),
@@ -136,7 +136,7 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+        'fluxvla/models/third_party_models/eagle2_hg_model',
         # special_tokens={'pad_token': '<PAD>'}
     ),
     collator=dict(
@@ -185,6 +185,7 @@ inference = dict(
         'pour the liquid in the dark-colored wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
         '16': 'put the dark-colored wide-mouth bottle back on the tabletop'
     },
+    mixed_precision_dtype='bf16',
     dataset=dict(
         type='PrivateInferenceDataset',
         embodiment_id=2,

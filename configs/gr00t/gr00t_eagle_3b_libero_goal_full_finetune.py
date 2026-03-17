@@ -77,7 +77,7 @@ train_dataloader = dict(
                     tokenizer=dict(
                         type='PretrainedTokenizer',
                         model_path=  # noqa: E251
-                        '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+                        'fluxvla/models/third_party_models/eagle2_hg_model',
                         # special_tokens={'pad_token': '<PAD>'}
                     )),
                 dict(type='ResizeImages', height=224, width=224),
@@ -112,7 +112,7 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+        'fluxvla/models/third_party_models/eagle2_hg_model',
         # special_tokens={'pad_token': '<PAD>'}
     ),
     collator=dict(
@@ -168,7 +168,7 @@ eval = dict(
                 tokenizer=dict(
                     type='PretrainedTokenizer',
                     model_path=  # noqa: E251
-                    '/limx/tos/users/liyinhao/projects/eagle2_hg_model',  # noqa: E501
+                    'fluxvla/models/third_party_models/eagle2_hg_model',
                     # special_tokens={'pad_token': '<PAD>'}
                 )),
             dict(

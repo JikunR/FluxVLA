@@ -14,6 +14,8 @@ A Unified, Modular, and Deployable VLA Codebase.
 
 ## Installation
 
+The following installation guide uses NVCC 12.4 as an example. Please adjust the CUDA version accordingly if your setup differs.
+
 ### Create conda environment
 
 ```
@@ -32,39 +34,34 @@ pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https
 Option 1: Install directly via pip:
 
 ```
-
-pip install flash-attn==2.5.5 --no-build-isolation --find-links https://github.com/Dao-AILab/flash-attention/releases
+pip install psutil ninja packaging
+# MAX_JOBS controls the number of parallel compilation threads; increase or decrease based on your machine's resources
+MAX_JOBS=8 pip install flash-attn==2.5.5 --no-build-isolation --find-links https://github.com/Dao-AILab/flash-attention/releases
 ```
 
-Option 2: Build from source:
+Option 2: Build from source (recommended if Option 1 fails):
 
 ```
 git clone https://github.com/Dao-AILab/flash-attention.git
 cd flash-attention
 git checkout v2.5.5
-MAX_JOBS=4 python setup.py install
+# MAX_JOBS controls the number of parallel compilation threads; increase or decrease based on your machine's resources
+MAX_JOBS=8 python setup.py install
 ```
 
 ### Install av
 
 ```
 conda install -c conda-forge av=14.4.0
+# If solving environment is too slow, try:
+# conda install -c conda-forge av=14.4.0 --solver=libmamba
 ```
 
 ### Install fluxvla
 
 ```
 pip install -r requirements.txt
-python setup.py develop
-```
-
-### Fix numpy version (Required)
-
-Some dependencies may install a higher version of numpy, but this project requires numpy 1.26.4. Run the following command to fix it:
-
-```
-pip uninstall numpy
-pip install numpy==1.26.4
+pip install --no-build-isolation -e .
 ```
 
 ### Online Evaluation Environment Setup
@@ -149,13 +146,15 @@ Note: All wandb configuration is read from environment variables. There is no ne
 
 Download the required prepared datasets and place them in the `./datasets` folder. Only download the datasets you need based on your configuration.
 
-| Dataset              | Download Link                                                                                                                    |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| libero-object        | [Aiming1998/libero_object_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_object_no_noops_lerobotv2.1)   |
-| libero-spatial       | [Aiming1998/libero_spatial_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_spatial_no_noops_lerobotv2.1) |
-| libero-10            | [Aiming1998/libero_10_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_10_no_noops_lerobotv2.1)           |
-| libero-goal          | [Aiming1998/libero_goal_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_goal_no_noops_lerobotv2.1)       |
-| modified_libero_rlds | [openvla/modified_libero_rlds](https://huggingface.co/datasets/openvla/modified_libero_rlds)                                     |
+| Dataset                | Download Link                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| libero-object          | [Aiming1998/libero_object_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_object_no_noops_lerobotv2.1)       |
+| libero-spatial         | [Aiming1998/libero_spatial_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_spatial_no_noops_lerobotv2.1)     |
+| libero-10              | [Aiming1998/libero_10_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_10_no_noops_lerobotv2.1)               |
+| libero-goal            | [Aiming1998/libero_goal_no_noops_lerobotv2.1](https://huggingface.co/datasets/Aiming1998/libero_goal_no_noops_lerobotv2.1)           |
+| modified_libero_rlds   | [openvla/modified_libero_rlds](https://huggingface.co/datasets/openvla/modified_libero_rlds)                                         |
+| RealRobot_AgileX_aloha | [yinchimaoliang/RealRobot_AgileX_aloha_lerobot_v2](https://huggingface.co/datasets/yinchimaoliang/RealRobot_AgileX_aloha_lerobot_v2) |
+| RealRobot_UR3_Chem     | [yinchimaoliang/RealRobot_UR3_Chem_lerobot_v2](https://huggingface.co/datasets/yinchimaoliang/RealRobot_UR3_Chem_lerobot_v2)         |
 
 To train models using fluxvla on private datasets, organize the datasets in the following format.
 
@@ -226,6 +225,19 @@ Download the required pretrained checkpoints and place them in the `./checkpoint
 
 > **Tip**: Use `huggingface-cli download <model-name> --local-dir ./checkpoints/<model-name>` for faster downloads.
 
+### Trained Models
+
+You can also download models that have already been trained with FluxVLA, and use them directly for inference or evaluation. Place them in the `./work_dirs` folder.
+
+| Model                     | Download Link                                                                                                                                   |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| PI0.5 PaliGemma Libero-10 | [yinchimaoliang/pi05_paligemma_libero_10_full_finetune_bs64](https://huggingface.co/yinchimaoliang/pi05_paligemma_libero_10_full_finetune_bs64) |
+| GR00T Eagle 3B Libero-10  | [yinchimaoliang/gr00t_eagle_3b_libero_10_full_finetune_bs64](https://huggingface.co/yinchimaoliang/gr00t_eagle_3b_libero_10_full_finetune_bs64) |
+
+```bash
+huggingface-cli download yinchimaoliang/pi05_paligemma_libero_10_full_finetune_bs64 --local-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune_bs64
+```
+
 ## Features
 
 - Support OpenVLA, LlavaVLA, Gr00t, Pi0 and Pi0.5.
@@ -244,7 +256,7 @@ Download the required pretrained checkpoints and place them in the `./checkpoint
 ### Debug locally
 
 ```
-/root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node [NUM_GPUS] scripts/train.py --config [CONFIG_PATH] --work-dir [WORK_DIR] --cfg-options train_dataloader.per_device_batch_size=[PER_DEVICE_BATCH_SIZE]
+/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node [NUM_GPUS] scripts/train.py --config [CONFIG_PATH] --work-dir [WORK_DIR] --cfg-options train_dataloader.per_device_batch_size=[PER_DEVICE_BATCH_SIZE]
 ```
 
 For example:
@@ -252,13 +264,21 @@ For example:
 ```
 export WANDB_MODE=disabled
 export HF_ENDPOINT="https://hf-mirror.com"
-/root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune --cfg-options train_dataloader.per_device_batch_size=2
+/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune --cfg-options train_dataloader.per_device_batch_size=2
 ```
 
 ### Eval locally
 
 ```
-/root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node [NUM_GPUS] scripts/eval.py --config [CONFIG_PATH] --ckpt-path [CKPT_PATH] --cfg-options [CFG_OPTIONS]
+/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node [NUM_GPUS] scripts/eval.py --config [CONFIG_PATH] --ckpt-path [CKPT_PATH] --cfg-options [CFG_OPTIONS]
+```
+
+For example:
+
+```
+export WANDB_MODE=disabled
+export HF_ENDPOINT="https://hf-mirror.com"
+/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/eval.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --ckpt-path work_dirs/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.pt
 ```
 
 ### Train on cluster
@@ -278,7 +298,7 @@ To resume training from a checkpoint, use the `--resume-from` parameter to speci
 ```
 export WANDB_MODE=disabled
 export HF_ENDPOINT="https://hf-mirror.com"
-/root/miniconda3/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py \
+/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune \
   --resume-from ./work_dirs/pi05_paligemma_libero_10_full_finetune/checkpoints/checkpoint_epoch_5.pth \

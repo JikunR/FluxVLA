@@ -201,7 +201,7 @@ train_dataloader = dict(
                     tokenizer=dict(
                         type='PretrainedTokenizer',
                         model_path=  # noqa: E251
-                        '/limx/tos/limx_mani_checkpoints/open_source/huggingface/pi0',  # noqa: E501
+                        './checkpoints/pi0_base',
                         # special_tokens={'pad_token': '<PAD>'}
                     )),
                 dict(type='ResizeImages', height=224, width=224),
@@ -235,7 +235,7 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        '/limx/tos/limx_mani_checkpoints/open_source/huggingface/pi0',  # noqa: E501
+        './checkpoints/pi0_base',
         # special_tokens={'pad_token': '<PAD>'}
     ),
     collator=dict(
@@ -288,7 +288,7 @@ eval = dict(
                 tokenizer=dict(
                     type='PretrainedTokenizer',
                     model_path=  # noqa: E251
-                    '/limx/tos/limx_mani_checkpoints/open_source/huggingface/pi0',  # noqa: E501
+                    './checkpoints/pi0_base',
                     # special_tokens={'pad_token': '<PAD>'}
                 )),
             dict(
