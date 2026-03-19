@@ -117,10 +117,9 @@ class AlohaOperator:
         self.puppet_arm_right_deque = deque()
         self.robot_base_deque = deque()
 
-        # Initialize thread control
-        self.puppet_arm_publish_thread = None
-        self.puppet_arm_publish_lock = threading.Lock()
-        self.puppet_arm_publish_lock.acquire()
+        # Trajectory execution state
+        self._traj_thread = None
+        self._traj_stop_event = threading.Event()
 
     def get_frame(self):
         """Get synchronized frame data from all sensors.
@@ -474,50 +473,95 @@ class AlohaOperator:
         self.robot_base_publisher = rospy.Publisher(
             self.robot_base_cmd_topic, Twist, queue_size=10)
 
-    def puppet_arm_publish(self, left, right):
-        """Publish joint commands to both puppet arms.
+    def get_current_joint_states(self):
+        """Get current joint states from both arms.
+
+        Returns:
+            tuple: (left_position, right_position) as numpy arrays,
+                or (None, None) if data is not available.
+        """
+        left_pos = None
+        right_pos = None
+
+        if len(self.puppet_arm_left_deque) > 0:
+            left_pos = np.array(self.puppet_arm_left_deque[-1].position)
+        if len(self.puppet_arm_right_deque) > 0:
+            right_pos = np.array(self.puppet_arm_right_deque[-1].position)
+
+        return left_pos, right_pos
+
+    def execute_step(self, left, right, base_velocity=None):
+        """Execute a single-step action command.
+
+        Sends one set of joint positions to both arms, and optionally
+        a base velocity command.
 
         Args:
-            left (list): List of 7 joint positions for left arm in radians
-            right (list): List of 7 joint positions for right arm in radians
+            left (list): Joint positions for left arm (7 values, radians).
+            right (list): Joint positions for right arm (7 values, radians).
+            base_velocity (list, optional): Base velocity
+                [linear_x, angular_z].
         """
-        import rospy
-        from sensor_msgs.msg import JointState
-        from std_msgs.msg import Header
+        self._send_joints(left, right)
+        if base_velocity is not None:
+            self._send_base_velocity(base_velocity)
 
-        joint_state_msg = JointState()
-        joint_state_msg.header = Header()
-        joint_state_msg.header.stamp = rospy.Time.now()
-        joint_state_msg.name = [
-            'joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5',
-            'joint6'
-        ]
-
-        # Publish left arm command
-        joint_state_msg.position = left
-        self.puppet_arm_left_publisher.publish(joint_state_msg)
-
-        # Publish right arm command
-        joint_state_msg.position = right
-        self.puppet_arm_right_publisher.publish(joint_state_msg)
-
-    def puppet_arm_publish_continuous(self, left, right):
-        """Publish continuous joint commands with interpolation.
-
-        Moves arms from current positions to target positions using
-        step-wise interpolation at the configured publish rate.
+    def execute_trajectory(self,
+                           left_trajectory,
+                           right_trajectory,
+                           dt=0.1,
+                           async_exec=False,
+                           base_velocity=None):
+        """Execute trajectories for both arms.
 
         Args:
-            left (list): Target joint positions for left arm in radians
-            right (list): Target joint positions for right arm in radians
+            left_trajectory (np.ndarray): Left arm trajectory [n_steps x 7].
+            right_trajectory (np.ndarray): Right arm trajectory [n_steps x 7].
+            dt (float): Time step between trajectory points in seconds.
+            async_exec (bool): If True, execute in background thread.
+                If False (default), block until trajectory completes.
+            base_velocity (np.ndarray, optional): Mobile base velocity
+                trajectory [n_steps x 2] (linear_x, angular_z).
+        """
+        left_traj = np.asarray(left_trajectory)
+        right_traj = np.asarray(right_trajectory)
+        base_vel = (
+            np.asarray(base_velocity) if base_velocity is not None else None)
 
-        Note:
-            This method runs until target positions are reached or
-            interrupted by the publish lock.
+        # Stop any existing trajectory (old event stays set → old thread exits)
+        self._traj_stop_event.set()
+        # Fresh event for the new trajectory
+        self._traj_stop_event = threading.Event()
+
+        stop_event = self._traj_stop_event
+        if async_exec:
+            self._traj_thread = threading.Thread(
+                target=self._run_trajectory,
+                args=(left_traj, right_traj, dt, base_vel, stop_event),
+                daemon=True)
+            self._traj_thread.start()
+        else:
+            self._run_trajectory(left_traj, right_traj, dt, base_vel,
+                                 stop_event)
+
+    def stop_trajectory(self):
+        """Stop the currently executing trajectory."""
+        self._traj_stop_event.set()
+
+    def is_trajectory_running(self):
+        """Check if a trajectory is currently being executed."""
+        return (self._traj_thread is not None and self._traj_thread.is_alive())
+
+    def move_to_joints(self, left, right):
+        """Move arms to target positions with step-wise interpolation.
+
+        Blocks until target positions are reached.
+
+        Args:
+            left (list): Target joint positions for left arm in radians.
+            right (list): Target joint positions for right arm in radians.
         """
         import rospy
-        from sensor_msgs.msg import JointState
-        from std_msgs.msg import Header
 
         rate = rospy.Rate(self.publish_rate)
         left_arm = None
@@ -548,10 +592,6 @@ class AlohaOperator:
 
         # Interpolation loop
         while flag and not rospy.is_shutdown():
-            # Check for interruption
-            if self.puppet_arm_publish_lock.acquire(False):
-                return
-
             # Calculate differences
             left_diff = [abs(left[i] - left_arm[i]) for i in range(len(left))]
             right_diff = [
@@ -576,119 +616,36 @@ class AlohaOperator:
                     right_arm[i] += right_symbol[i] * self.arm_steps_length[i]
                     flag = True
 
-            # Publish updated positions
-            joint_state_msg = JointState()
-            joint_state_msg.header = Header()
-            joint_state_msg.header.stamp = rospy.Time.now()
-            joint_state_msg.name = [
-                'joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5',
-                'joint6'
-            ]
-
-            joint_state_msg.position = left_arm
-            self.puppet_arm_left_publisher.publish(joint_state_msg)
-
-            joint_state_msg.position = right_arm
-            self.puppet_arm_right_publisher.publish(joint_state_msg)
+            self._send_joints(left_arm, right_arm)
 
             step += 1
-            print('puppet_arm_publish_continuous:', step)
+            print(f'move_to_joints: step {step}')
             rate.sleep()
 
-    def puppet_arm_publish_linear(self, left, right):
-        """Publish linearly interpolated joint commands.
-
-        Moves arms from current positions to target positions using
-        linear interpolation with fixed number of steps.
-
-        Args:
-            left (list): Target joint positions for left arm in radians
-            right (list): Target joint positions for right arm in radians
-        """
+    def _send_joints(self, left, right):
+        """Publish joint commands to both puppet arms."""
         import rospy
         from sensor_msgs.msg import JointState
         from std_msgs.msg import Header
 
-        num_step = 100
-        rate = rospy.Rate(200)
+        joint_state_msg = JointState()
+        joint_state_msg.header = Header()
+        joint_state_msg.header.stamp = rospy.Time.now()
+        joint_state_msg.name = [
+            'joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+            'joint6'
+        ]
 
-        left_arm = None
-        right_arm = None
+        # Publish left arm command
+        joint_state_msg.position = left
+        self.puppet_arm_left_publisher.publish(joint_state_msg)
 
-        # Wait for initial arm states
-        while not rospy.is_shutdown():
-            if len(self.puppet_arm_left_deque) != 0:
-                left_arm = list(self.puppet_arm_left_deque[-1].position)
-            if len(self.puppet_arm_right_deque) != 0:
-                right_arm = list(self.puppet_arm_right_deque[-1].position)
+        # Publish right arm command
+        joint_state_msg.position = right
+        self.puppet_arm_right_publisher.publish(joint_state_msg)
 
-            if left_arm is not None and right_arm is not None:
-                break
-            rate.sleep()
-
-        # Generate linear trajectories
-        traj_left_list = np.linspace(left_arm, left, num_step)
-        traj_right_list = np.linspace(right_arm, right, num_step)
-
-        # Execute trajectories
-        for i in range(len(traj_left_list)):
-            traj_left = traj_left_list[i]
-            traj_right = traj_right_list[i]
-
-            # Ensure gripper reaches exact target
-            traj_left[-1] = left[-1]
-            traj_right[-1] = right[-1]
-
-            joint_state_msg = JointState()
-            joint_state_msg.header = Header()
-            joint_state_msg.header.stamp = rospy.Time.now()
-            joint_state_msg.name = [
-                'joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5',
-                'joint6'
-            ]
-
-            joint_state_msg.position = traj_left
-            self.puppet_arm_left_publisher.publish(joint_state_msg)
-
-            joint_state_msg.position = traj_right
-            self.puppet_arm_right_publisher.publish(joint_state_msg)
-
-            rate.sleep()
-
-    def puppet_arm_publish_continuous_thread(self, left, right):
-        """Start continuous arm publishing in a separate thread.
-
-        Creates a background thread for continuous arm movement,
-        allowing non-blocking operation. Manages thread lifecycle
-        to prevent concurrency issues.
-
-        Args:
-            left (list): Target joint positions for left arm in radians
-            right (list): Target joint positions for right arm in radians
-        """
-        # Clean up existing thread if present
-        if self.puppet_arm_publish_thread is not None:
-            # Release lock to allow thread termination
-            self.puppet_arm_publish_lock.release()
-            # Wait for thread completion
-            self.puppet_arm_publish_thread.join()
-            # Re-acquire lock
-            self.puppet_arm_publish_lock.acquire(False)
-            self.puppet_arm_publish_thread = None
-
-        # Create and start new thread
-        self.puppet_arm_publish_thread = threading.Thread(
-            target=self.puppet_arm_publish_continuous, args=(left, right))
-        self.puppet_arm_publish_thread.start()
-
-    def robot_base_publish(self, vel):
-        """Publish velocity commands to mobile base.
-
-        Args:
-            vel (list): Velocity command with 2 elements:
-                [linear_x, angular_z] where linear_x is forward velocity
-                in m/s and angular_z is rotational velocity in rad/s
-        """
+    def _send_base_velocity(self, vel):
+        """Publish velocity commands to mobile base."""
         from geometry_msgs.msg import Twist
 
         vel_msg = Twist()
@@ -700,3 +657,26 @@ class AlohaOperator:
         vel_msg.angular.z = vel[1]
 
         self.robot_base_publisher.publish(vel_msg)
+
+    def _run_trajectory(self, left_traj, right_traj, dt, base_vel, stop_event):
+        """Execute trajectory step by step.
+
+        Args:
+            left_traj (np.ndarray): Left arm trajectory [n_steps x 7].
+            right_traj (np.ndarray): Right arm trajectory [n_steps x 7].
+            dt (float): Time step between points in seconds.
+            base_vel (np.ndarray, optional): Base velocity [n_steps x 2].
+            stop_event (threading.Event): Event to signal early stop.
+        """
+        import rospy
+
+        stop = stop_event
+        rate = rospy.Rate(1.0 / dt)
+
+        for i in range(len(left_traj)):
+            if rospy.is_shutdown() or stop.is_set():
+                break
+            self._send_joints(left_traj[i].tolist(), right_traj[i].tolist())
+            if base_vel is not None:
+                self._send_base_velocity(base_vel[i])
+            rate.sleep()

@@ -105,6 +105,7 @@ class PI0FlowMatching(BaseVLA):
                  max_action_dim: int = 7,
                  ori_action_dim: int = None,
                  num_steps: int = 10,
+                 rtc_training_config: Optional[Dict] = None,
                  **kwargs):
         super(PI0FlowMatching, self).__init__(
             vision_backbone=vision_backbone,
@@ -165,6 +166,7 @@ class PI0FlowMatching(BaseVLA):
         self.max_action_dim = max_action_dim
         self.ori_action_dim = ori_action_dim
         self.num_steps = num_steps
+        self.rtc_training_config = rtc_training_config
 
     def to_bfloat16(self):
         for name, param in self.named_parameters():
@@ -299,7 +301,8 @@ class PI0FlowMatching(BaseVLA):
 
         # Fuse timestep + action information using an MLP
         action_emb = self.action_in_proj(noisy_actions)
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
+        if time_emb.ndim == 2:
+            time_emb = time_emb[:, None, :].expand_as(action_emb)
         action_time_emb = torch.cat([action_emb, time_emb], dim=2)
         action_time_emb = self.action_time_mlp_in(action_time_emb)
         action_time_emb = F.silu(action_time_emb)
@@ -586,8 +589,24 @@ class PI0FlowMatching(BaseVLA):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        T = actions.shape[1]
+        if (self.rtc_training_config
+                and self.rtc_training_config.get('enabled', False)):
+            from fluxvla.engines.utils.rtc_training import (
+                apply_rtc_time_conditioning, sample_training_delay)
+            delays = sample_training_delay(
+                batch_size=actions.shape[0],
+                max_delay=self.rtc_training_config.get('max_delay', 5),
+                distribution=self.rtc_training_config.get(
+                    'distribution', 'exponential'),
+                device=actions.device)
+            # Per-position time: 0.0 at delay positions (PI0: time=0 is clean)
+            t, action_masks = apply_rtc_time_conditioning(
+                time, action_masks, delays, T, clean_time=0.0)  # (B, T)
+        else:
+            t = time.unsqueeze(1).expand(-1, T)  # (B, T)
+
+        x_t = t.unsqueeze(-1) * noise + (1 - t.unsqueeze(-1)) * actions
         u_t = noise - actions
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images=images,
@@ -597,7 +616,7 @@ class PI0FlowMatching(BaseVLA):
             past_key_values=past_key_values)
 
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
-            self.embed_suffix(states, x_t, time))
+            self.embed_suffix(states, x_t, t))
         inputs_embeds = [prefix_embs, suffix_embs]
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
@@ -625,19 +644,75 @@ class PI0FlowMatching(BaseVLA):
             v_t = v_t[:, :, :self.ori_action_dim]
             u_t = u_t[:, :, :self.ori_action_dim]
         if action_masks is not None:
-            losses = F.mse_loss(
-                u_t,
-                v_t,
-                weight=action_masks.unsqueeze(-1).repeat(1, 1, u_t.shape[-1]),
-                reduction='mean')
-        else:
             losses = F.mse_loss(u_t, v_t, reduction='none')
+            losses = losses * action_masks.unsqueeze(-1)
+            loss = losses.sum() / (action_masks.sum() * u_t.shape[-1] + 1e-8)
+        else:
+            loss = F.mse_loss(u_t, v_t)
 
         return_dict = dict(
             predictions=v_t,
-            loss=losses.mean(),
+            loss=loss,
         )
         return return_dict
+
+    def _predict_action_plain(self, x_t, denoise, bsize, dt, device):
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            t_batch = time.expand(bsize)
+            v_t = denoise(x_t, t_batch)
+            x_t += dt * v_t
+            time += dt
+        return x_t
+
+    def _predict_action_prefix_rtc(self, x_t, denoise, bsize, dt, device,
+                                   prev_actions, prefix_len):
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        prefix_mask = torch.zeros(
+            bsize, self.n_action_steps, dtype=torch.bool, device=device)
+        prefix_mask[:, :prefix_len] = True
+
+        while time >= -dt / 2:
+            t_batch = time.expand(bsize)
+            x_t[:, :prefix_len] = prev_actions[:, :prefix_len]
+            t_pos = t_batch.unsqueeze(1)
+            t_pos = t_pos.expand(-1, self.n_action_steps).clone()
+            t_pos[prefix_mask] = 0.0
+            v_t = denoise(x_t, t_pos)
+            x_t += dt * v_t
+            time += dt
+
+        x_t[:, :prefix_len] = prev_actions[:, :prefix_len]
+        return x_t
+
+    def _predict_action_guidance_rtc(self, x_t, denoise, bsize, dt, device,
+                                     prev_actions, prefix_len, rtc_config):
+        from fluxvla.engines.utils.rtc_guidance import (apply_rtc_guidance,
+                                                        compute_prefix_weights)
+
+        prefix_weights = compute_prefix_weights(
+            self.n_action_steps,
+            prefix_len,
+            rtc_config.get('decay_end', prefix_len * 2),
+            rtc_config.get('schedule', 'exp'),
+            device=device)
+        max_gw = rtc_config.get('max_guidance_weight', 5.0)
+        use_vjp = rtc_config.get('use_vjp', False)
+
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            t_batch = time.expand(bsize)
+            v_t = apply_rtc_guidance(
+                x_t,
+                lambda x: denoise(x, t_batch),
+                prev_actions,
+                prefix_weights,
+                1.0 - time.item(),
+                max_gw,
+                use_vjp=use_vjp)
+            x_t += dt * v_t
+            time += dt
+        return x_t
 
     def predict_action(self,
                        images: List[torch.Tensor],
@@ -648,6 +723,9 @@ class PI0FlowMatching(BaseVLA):
                        past_key_values: Optional[Union[List[torch.FloatTensor],
                                                        Cache]] = None,
                        noise=None,
+                       prev_actions=None,
+                       prefix_len: int = 0,
+                       rtc_config: dict = None,
                        *args,
                        **kwargs):
         device = states.device
@@ -681,21 +759,39 @@ class PI0FlowMatching(BaseVLA):
         dt = -1.0 / self.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
-        x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
-        while time >= -dt / 2:
-            expanded_time = time.expand(bsize)
-            v_t = self.denoise_step(
-                states,
-                prefix_pad_masks,
-                past_key_values,
-                x_t,
-                expanded_time,
-            )
+        rtc_method = None
+        if prev_actions is not None and prefix_len > 0 and rtc_config:
+            rtc_method = rtc_config.get('method', 'prefix')
 
-            # Euler step
-            x_t += dt * v_t
-            time += dt
+        x_t = noise
+
+        def denoise(x, t):
+            return self.denoise_step(states, prefix_pad_masks, past_key_values,
+                                     x, t)
+
+        if rtc_method == 'prefix':
+            x_t = self._predict_action_prefix_rtc(
+                x_t=x_t,
+                denoise=denoise,
+                bsize=bsize,
+                dt=dt,
+                device=device,
+                prev_actions=prev_actions,
+                prefix_len=prefix_len)
+        elif rtc_method == 'guidance':
+            x_t = self._predict_action_guidance_rtc(
+                x_t=x_t,
+                denoise=denoise,
+                bsize=bsize,
+                dt=dt,
+                device=device,
+                prev_actions=prev_actions,
+                prefix_len=prefix_len,
+                rtc_config=rtc_config)
+        else:
+            x_t = self._predict_action_plain(
+                x_t=x_t, denoise=denoise, bsize=bsize, dt=dt, device=device)
+
         return x_t
 
     def denoise_step(

@@ -138,22 +138,20 @@ class MultiEmbodimentActionEncoder(nn.Module):
     def forward(self, actions, timesteps, cat_ids):
         """
         actions:   shape (B, T, action_dim)
-        timesteps: shape (B,)  -- a single scalar per batch item
+        timesteps: shape (B,) or (B, T) -- per-sample or per-position
         cat_ids:   shape (B,)
         returns:   shape (B, T, hidden_size)
         """
         B, T, _ = actions.shape
 
-        # 1) Expand each batch's single scalar time 'tau' across all T steps
-        #    so that shape => (B, T)
-        #    e.g. if timesteps is (B,), replicate across T
-        if timesteps.dim() == 1 and timesteps.shape[0] == B:
-            # shape (B,) => (B,T)
+        # Accept (B,) or (B, T) timesteps
+        if timesteps.dim() == 1:
             timesteps = timesteps.unsqueeze(1).expand(-1, T)
+        elif timesteps.dim() == 2:
+            assert timesteps.shape == (B, T)
         else:
-            raise ValueError(
-                'Expected `timesteps` to have shape (B,) so we can '
-                'replicate across T.')
+            raise ValueError(f'Expected timesteps shape (B,) or (B,T), got '
+                             f'{timesteps.shape}')
 
         # 2) Standard action MLP step for shape => (B, T, w)
         a_emb = self.W1(actions, cat_ids)
@@ -232,9 +230,11 @@ class FlowMatchingHead(nn.Module):
                      output_dim=1024,
                      positional_embeddings=None),
                  ori_action_dim=None,
+                 rtc_training_config=None,
                  *args,
                  **kwargs):
         super().__init__()
+        self.rtc_training_config = rtc_training_config
         self.hidden_size = hidden_size
         self.state_encoder = CategorySpecificMLP(
             num_categories=max_num_embodiments,
@@ -287,14 +287,29 @@ class FlowMatchingHead(nn.Module):
             states.unsqueeze(1), embodiment_ids)
         noise = torch.randn(
             actions.shape, device=actions.device, dtype=actions.dtype)
-        t = self.sample_time(
+        t_scalar = self.sample_time(
             actions.shape[0], device=actions.device, dtype=actions.dtype)
-        t = t[:, None, None]  # shape (B,1,1) for broadcast
-        noisy_trajectory = (1 - t) * noise + t * actions
+        T = actions.shape[1]
+        if (self.rtc_training_config
+                and self.rtc_training_config.get('enabled', False)):
+            from fluxvla.engines.utils.rtc_training import (
+                apply_rtc_time_conditioning, sample_training_delay)
+            delays = sample_training_delay(
+                batch_size=actions.shape[0],
+                max_delay=self.rtc_training_config.get('max_delay', 5),
+                distribution=self.rtc_training_config.get(
+                    'distribution', 'exponential'),
+                device=actions.device)
+            t, action_masks = apply_rtc_time_conditioning(
+                t_scalar, action_masks, delays, T)  # (B, T)
+        else:
+            t = t_scalar.unsqueeze(1).expand(-1, T)  # (B, T)
+
+        t_encoder = (t * self.num_timestep_buckets).long()  # (B, T)
+        noisy_trajectory = (
+            1 - t.unsqueeze(-1)) * noise + t.unsqueeze(-1) * actions
         velocity = actions - noise
-        # Convert (continuous) t -> discrete if needed
-        t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
-        action_features = self.action_encoder(noisy_trajectory, t_discretized,
+        action_features = self.action_encoder(noisy_trajectory, t_encoder,
                                               embodiment_ids)
 
         # Maybe add position embedding.
@@ -314,12 +329,14 @@ class FlowMatchingHead(nn.Module):
 
         vl_attn_mask = attention_mask
 
+        # DiT AdaLN uses global time — always pass scalar (B,)
+        t_global = (t_scalar * self.num_timestep_buckets).long()
         model_output = self.model(
             hidden_states=sa_embs,
             encoder_hidden_states=input_features,
             encoder_attention_mask=vl_attn_mask,
-            timestep=t_discretized,
-            return_all_hidden_states=False,  # NOTE (YL): not using flare now
+            timestep=t_global,
+            return_all_hidden_states=False,
         )
         pred = self.action_decoder(model_output, embodiment_ids)
         pred_actions = pred[:, -actions.shape[1]:]
@@ -339,9 +356,125 @@ class FlowMatchingHead(nn.Module):
             loss=loss,
         )
 
-    def predict_action(self, input_features: torch.Tensor,
-                       states: torch.Tensor, attention_mask: torch.Tensor,
-                       embodiment_ids: torch.Tensor):
+    def denoise_step(self,
+                     actions,
+                     input_features,
+                     state_features,
+                     attention_mask,
+                     embodiment_ids,
+                     t_global,
+                     t_encoder=None):
+        """Single denoising step extracted from predict_action loop.
+
+        Args:
+            actions: Current noisy actions (B, T, D).
+            input_features: Processed VL features (B, S, H).
+            state_features: Encoded state (B, 1, H).
+            attention_mask: VL attention mask.
+            embodiment_ids: Embodiment IDs (B,).
+            t_global: Discretized timestep (B,) for DiT AdaLN.
+            t_encoder: Per-position timestep (B, T) for action
+                encoder. If None, uses t_global.
+
+        Returns:
+            Predicted velocity (B, T, D).
+        """
+        t_enc = t_encoder if t_encoder is not None else t_global
+        action_features = self.action_encoder(actions, t_enc, embodiment_ids)
+        if self.add_positional_embeddings:
+            pos_ids = torch.arange(
+                action_features.shape[1],
+                dtype=torch.long,
+                device=actions.device)
+            pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+            action_features = action_features + pos_embs
+
+        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(
+            input_features.shape[0], -1, -1)
+        sa_embs = torch.cat((state_features, future_tokens, action_features),
+                            dim=1)
+
+        model_output = self.model(
+            hidden_states=sa_embs,
+            encoder_hidden_states=input_features,
+            encoder_attention_mask=attention_mask,
+            timestep=t_global,
+        )
+        pred = self.action_decoder(model_output, embodiment_ids)
+        return pred[:, -self.num_steps:]
+
+    def _predict_action_plain(self, actions, denoise, batch_size, device, dt):
+        for t in range(self.num_inference_timesteps):
+            t_cont = t / float(self.num_inference_timesteps)
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+            t_global = torch.full((batch_size, ),
+                                  fill_value=t_discretized,
+                                  device=device)
+            v = denoise(actions, t_global)
+            actions = actions + dt * v
+        return actions
+
+    def _predict_action_prefix_rtc(self, actions, denoise, batch_size, device,
+                                   dt, prev_actions, prefix_len):
+        for t in range(self.num_inference_timesteps):
+            t_cont = t / float(self.num_inference_timesteps)
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+            t_global = torch.full((batch_size, ),
+                                  fill_value=t_discretized,
+                                  device=device)
+
+            actions[:, :prefix_len] = prev_actions[:, :prefix_len]
+            t_enc = torch.full((batch_size, self.num_steps),
+                               fill_value=t_discretized,
+                               dtype=torch.long,
+                               device=device)
+            t_enc[:, :prefix_len] = self.num_timestep_buckets
+            v = denoise(actions, t_global, t_enc)
+            actions = actions + dt * v
+
+        actions[:, :prefix_len] = prev_actions[:, :prefix_len]
+        return actions
+
+    def _predict_action_guidance_rtc(self, actions, denoise, batch_size,
+                                     device, dt, prev_actions, prefix_len,
+                                     rtc_config):
+        from fluxvla.engines.utils.rtc_guidance import (apply_rtc_guidance,
+                                                        compute_prefix_weights)
+
+        prefix_weights = compute_prefix_weights(
+            self.num_steps,
+            prefix_len,
+            rtc_config.get('decay_end', prefix_len * 2),
+            rtc_config.get('schedule', 'exp'),
+            device=device)
+        max_gw = rtc_config.get('max_guidance_weight', 5.0)
+        use_vjp = rtc_config.get('use_vjp', False)
+
+        for t in range(self.num_inference_timesteps):
+            t_cont = t / float(self.num_inference_timesteps)
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+            t_global = torch.full((batch_size, ),
+                                  fill_value=t_discretized,
+                                  device=device)
+            v = apply_rtc_guidance(
+                actions,
+                lambda x: denoise(x, t_global),
+                prev_actions,
+                prefix_weights,
+                t_cont,
+                max_gw,
+                use_vjp=use_vjp)
+            actions = actions + dt * v
+        return actions
+
+    def predict_action(self,
+                       input_features: torch.Tensor,
+                       states: torch.Tensor,
+                       attention_mask: torch.Tensor,
+                       embodiment_ids: torch.Tensor,
+                       prev_actions=None,
+                       prefix_len: int = 0,
+                       rtc_config: dict = None):
         device = input_features.device
         input_features = self.vlln(input_features)
         input_features = self.vl_self_attention(input_features)
@@ -353,47 +486,44 @@ class FlowMatchingHead(nn.Module):
             dtype=input_features.dtype,
             device=input_features.device,
         )
-
         dt = 1.0 / self.num_inference_timesteps
 
-        # Run denoising steps.
-        for t in range(self.num_inference_timesteps):
-            t_cont = t / float(
-                self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
-            t_discretized = int(t_cont * self.num_timestep_buckets)
+        rtc_method = None
+        if prev_actions is not None and prefix_len > 0 and rtc_config:
+            rtc_method = rtc_config.get('method', 'prefix')
 
-            # Embed noised action trajectory.
-            timesteps_tensor = torch.full(
-                size=(batch_size, ), fill_value=t_discretized, device=device)
-            action_features = self.action_encoder(actions, timesteps_tensor,
-                                                  embodiment_ids)
-            # Maybe add position embedding.
-            if self.add_positional_embeddings:
-                pos_ids = torch.arange(
-                    action_features.shape[1], dtype=torch.long, device=device)
-                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-                action_features = action_features + pos_embs
+        def denoise(x, t_global, t_encoder=None):
+            return self.denoise_step(x, input_features, state_features,
+                                     attention_mask, embodiment_ids, t_global,
+                                     t_encoder)
 
-            # Join vision, language,
-            # state and action embedding along sequence dim.
-            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(
-                input_features.shape[0], -1, -1)
-            sa_embs = torch.cat(
-                (state_features, future_tokens, action_features), dim=1)
+        if rtc_method == 'prefix':
+            actions = self._predict_action_prefix_rtc(
+                actions=actions,
+                denoise=denoise,
+                batch_size=batch_size,
+                device=device,
+                dt=dt,
+                prev_actions=prev_actions,
+                prefix_len=prefix_len)
+        elif rtc_method == 'guidance':
+            actions = self._predict_action_guidance_rtc(
+                actions=actions,
+                denoise=denoise,
+                batch_size=batch_size,
+                device=device,
+                dt=dt,
+                prev_actions=prev_actions,
+                prefix_len=prefix_len,
+                rtc_config=rtc_config)
+        else:
+            actions = self._predict_action_plain(
+                actions=actions,
+                denoise=denoise,
+                batch_size=batch_size,
+                device=device,
+                dt=dt)
 
-            # Run model forward.
-            model_output = self.model(
-                hidden_states=sa_embs,
-                encoder_hidden_states=input_features,
-                encoder_attention_mask=attention_mask,
-                timestep=timesteps_tensor,
-            )
-            pred = self.action_decoder(model_output, embodiment_ids)
-
-            pred_velocity = pred[:, -self.num_steps:]
-
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
         if self.ori_action_dim is not None:
             actions = actions[:, :, :self.ori_action_dim]
         return actions

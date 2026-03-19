@@ -694,7 +694,7 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
 
     def predict_action(self, input_features: torch.Tensor,
                        states: torch.Tensor, attention_mask: torch.Tensor,
-                       embodiment_ids: torch.Tensor):
+                       embodiment_ids: torch.Tensor, *args, **kwargs):
         if not self.loaded_weights:
             self._load_weights_and_buffer()
             self.loaded_weights = True

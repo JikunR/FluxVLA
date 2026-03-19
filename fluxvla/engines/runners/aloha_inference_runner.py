@@ -12,13 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
 
 from ..utils.root import RUNNERS
 from .base_inference_runner import BaseInferenceRunner
+
+
+def resample_remaining(traj, offset):
+    """Linearly interpolate remaining trajectory from a fractional offset.
+
+    Args:
+        traj: (N, D) sequential data (numpy array).
+        offset: Fractional starting index, e.g. (t - t0) / dt.
+
+    Returns:
+        (M, D) resampled rows where M = N - int(offset).
+    """
+    N = traj.shape[0]
+    M = N - int(offset)
+    if M <= 0:
+        return traj[:0]
+    idx = np.clip(offset + np.arange(M), 0.0, N - 1.0)
+    lo = np.floor(idx).astype(int)
+    hi = np.minimum(lo + 1, N - 1)
+    alpha = (idx - lo)[:, np.newaxis]
+    return traj[lo] + alpha * (traj[hi] - traj[lo])
 
 
 @RUNNERS.register_module()
@@ -45,9 +66,13 @@ class AlohaInferenceRunner(BaseInferenceRunner):
     def __init__(self,
                  gripper_threshold: float = 0.05,
                  prepare_pose: List[float] = None,
+                 async_execution: bool = False,
+                 execute_horizon: int = None,
                  *args,
                  **kwargs):
         self.gripper_threshold = gripper_threshold
+        self.async_execution = async_execution
+        self.execute_horizon = execute_horizon
         # Set Aloha-specific defaults
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
             kwargs['camera_names'] = [
@@ -98,6 +123,9 @@ class AlohaInferenceRunner(BaseInferenceRunner):
 
         # Call parent constructor
         super().__init__(*args, **kwargs)
+
+        self.dt = 1.0 / self.publish_rate
+
         if prepare_pose is None:
             # Initialize other special poses
             self.prepare_pose = ([
@@ -216,55 +244,66 @@ class AlohaInferenceRunner(BaseInferenceRunner):
         """Move robot to predefined preparation pose."""
         if self.prepare_pose is not None:
             left_pose, right_pose = self.prepare_pose
-            self.ros_operator.puppet_arm_publish_continuous(
-                left_pose, right_pose)
+            self.ros_operator.move_to_joints(left_pose, right_pose)
 
-    def _execute_actions(self, actions: np.ndarray, rate):
-        """Execute a sequence of dual-arm robot actions.
+    def _predict_action(self, inputs: dict):
+        self._action_ctx.inference_start = time.time()
+        raw_action = self.vla.predict_action(**inputs)
+        return raw_action
 
-        Args:
-            actions (np.ndarray): Array of denormalized robot actions
-            rate: ROS rate limiter for action timing
+    # Action layout: [left_arm(7), right_arm(7), base(2)]
+    LEFT_GRIPPER_COL = 6
+    RIGHT_GRIPPER_COL = 13
+    GRIPPER_CLOSED = -0.01
+
+    def _postprocess_actions(self, raw_action):
+        """Denormalize and snap near-closed grippers to fully closed."""
+        actions = super()._postprocess_actions(raw_action)
+        for col in (self.LEFT_GRIPPER_COL, self.RIGHT_GRIPPER_COL):
+            actions[:,
+                    col] = np.where(actions[:, col] < self.gripper_threshold,
+                                    self.GRIPPER_CLOSED, actions[:, col])
+        return actions
+
+    def _execute_actions(self, actions, rate):
+        """Execute dual-arm actions (sync or async).
+
+        In async mode, skips steps that elapsed during inference.
         """
-        for act in actions:
-            left_action = act[:7]
-            right_action = act[7:14]
+        if self.disable_puppet_arm:
+            return
 
-            # Apply gripper threshold logic
-            fake_left_action = copy.deepcopy(left_action)
-            fake_right_action = copy.deepcopy(right_action)
-            if fake_left_action[-1] < self.gripper_threshold:
-                fake_left_action[-1] = -0.01
-            if fake_right_action[-1] < self.gripper_threshold:
-                fake_right_action[-1] = -0.01
+        ctx = self._action_ctx
 
-            # Send commands to both arms
-            if not self.disable_puppet_arm:
-                self.ros_operator.puppet_arm_publish(fake_left_action,
-                                                     fake_right_action)
+        if self.async_execution and self._prev_ctx is not None:
+            ctx.action_timestamp = ctx.inference_start
+            offset = (time.time() - ctx.action_timestamp) / self.dt
+            actions = resample_remaining(actions, offset)
+        else:
+            ctx.action_timestamp = time.time()
+            if self.execute_horizon is not None:
+                actions = actions[:self.execute_horizon]
 
-            # Send robot base commands if enabled
-            if self.use_robot_base:
-                vel_action = act[14:16]
-                self.ros_operator.robot_base_publish(vel_action)
+        self.ros_operator.execute_trajectory(
+            actions[:, :7],
+            actions[:, 7:14],
+            dt=self.dt,
+            async_exec=self.async_execution,
+            base_velocity=actions[:, 14:16] if self.use_robot_base else None)
 
-            rate.sleep()
+        if self.async_execution and self.execute_horizon is not None:
+            time.sleep(self.execute_horizon * self.dt)
 
     def cleanup(self):
-        """Clean up resources and shutdown gracefully."""
+        """Clean up resources."""
         from ..utils import initialize_overwatch
 
         overwatch = initialize_overwatch(__name__)
         overwatch.info('Cleaning up AlohaInferenceRunner')
 
-        # Clear observation window
-        if self.observation_window is not None:
-            self.observation_window.clear()
+        if hasattr(self.ros_operator, 'stop_trajectory'):
+            self.ros_operator.stop_trajectory()
 
-        # Move to home pose
-        if self.home_pose is not None:
-            left_pose, right_pose = self.home_pose
-            self.ros_operator.puppet_arm_publish_continuous(
-                left_pose, right_pose)
+        super().cleanup()
 
         overwatch.info('AlohaInferenceRunner cleanup completed')
