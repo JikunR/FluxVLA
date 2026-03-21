@@ -1,4 +1,9 @@
-# Modified from https://github.com/openvla/openvla/blob/main/prismatic/overwatch/overwatch.py  # noqa: E501
+# Origin: Modified from
+# Upstream-Repo: openvla/openvla
+# Upstream-Path: prismatic/overwatch/overwatch.py
+# Upstream-Ref: main
+# SPDX-License-Identifier: MIT
+# Notes: Attribution normalized; no functional change.
 """
 overwatch.py
 

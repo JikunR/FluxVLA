@@ -1,4 +1,9 @@
-# Modified from https://github.com/openvla/openvla/blob/c8f03f48af692657d3060c19588038c7220e9af9/prismatic/vla/datasets/rlds/dataset.py  # noqa: E501
+# Origin: Modified from
+# Upstream-Repo: openvla/openvla
+# Upstream-Path: prismatic/vla/datasets/rlds/dataset.py
+# Upstream-Ref: c8f03f48af692657d3060c19588038c7220e9af9
+# SPDX-License-Identifier: MIT
+# Notes: Attribution normalized; no functional change.
 
 import copy
 import json

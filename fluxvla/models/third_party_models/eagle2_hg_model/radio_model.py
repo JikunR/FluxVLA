@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Source: https://github.com/NVIDIA/Isaac-GR00T
-# Branch: n1.5-release
-# Path: gr00t/model/backbone/eagle2_hg_model/radio_model.py
+# Origin: Source
+# Upstream-URL: https://github.com/NVIDIA/Isaac-GR00T/blob/n1.5-release/gr00t/model/backbone/eagle2_hg_model/radio_model.py
+# Upstream-Ref: n1.5-release
+# Notes: Attribution normalized; no functional change.
 
 import copy
 import math

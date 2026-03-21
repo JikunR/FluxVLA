@@ -1,7 +1,9 @@
-# Source: https://github.com/NVIDIA/Isaac-GR00T
-# Branch: n1.5-release
-# Path: gr00t/model/backbone/eagle2_hg_model/modeling_eagle2_5_vl.py
-# Modified from https://github.com/dexmal/realtime-vla/blob/main/pi0_infer.py
+# Origin: Modified from
+# Upstream-URL: https://github.com/NVIDIA/Isaac-GR00T/blob/n1.5-release/gr00t/model/backbone/eagle2_hg_model/modeling_eagle2_5_vl.py
+# Additional-Upstream-URL: https://github.com/dexmal/realtime-vla/blob/main/pi0_infer.py
+# Upstream-Ref: n1.5-release, main
+# SPDX-License-Identifier: Apache-2.0
+# Notes: Attribution normalized; no functional change.
 
 import inspect
 from typing import List, Optional, Tuple, Union
