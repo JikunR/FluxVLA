@@ -1,4 +1,9 @@
-# Modified from https://github.com/Physical-Intelligence/openpi/blob/main/src/openpi/shared/download.py  # noqa: E501
+# Origin: Modified from
+# Upstream-Repo: Physical-Intelligence/openpi
+# Upstream-Path: src/openpi/shared/download.py
+# Upstream-Ref: main
+# SPDX-License-Identifier: Apache-2.0
+# Notes: Attribution normalized; no functional change.
 import concurrent.futures
 import datetime
 import getpass

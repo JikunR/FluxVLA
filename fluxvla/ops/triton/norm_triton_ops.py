@@ -1,4 +1,8 @@
-# Modified from https://github.com/dexmal/realtime-vla/blob/main/pi0_infer.py
+# Origin: Modified from
+# Upstream-URL: https://github.com/dexmal/realtime-vla/blob/main/pi0_infer.py
+# Upstream-Ref: main
+# SPDX-License-Identifier: MIT
+# Notes: Attribution normalized; no functional change.
 
 import triton
 import triton.language as tl

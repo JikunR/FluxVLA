@@ -1,4 +1,9 @@
-# Modified from https://github.com/openvla/openvla/blob/main/prismatic/training/strategies/ddp.py  # noqa: E501
+# Origin: Modified from
+# Upstream-Repo: openvla/openvla
+# Upstream-Path: prismatic/training/strategies/ddp.py
+# Upstream-Ref: main
+# SPDX-License-Identifier: MIT
+# Notes: Attribution normalized; no functional change.
 import os
 from collections import deque
 from pathlib import Path

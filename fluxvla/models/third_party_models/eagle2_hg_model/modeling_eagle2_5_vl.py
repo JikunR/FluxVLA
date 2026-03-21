@@ -5,9 +5,10 @@
 # --------------------------------------------------------
 
 #
-# Source: https://github.com/NVIDIA/Isaac-GR00T
-# Branch: n1.5-release
-# Path: gr00t/model/backbone/eagle2_hg_model/modeling_eagle2_5_vl.py
+# Origin: Source
+# Upstream-URL: https://github.com/NVIDIA/Isaac-GR00T/blob/n1.5-release/gr00t/model/backbone/eagle2_hg_model/modeling_eagle2_5_vl.py
+# Upstream-Ref: n1.5-release
+# Notes: Attribution normalized; no functional change.
 
 import inspect
 from typing import List, Optional, Tuple, Union

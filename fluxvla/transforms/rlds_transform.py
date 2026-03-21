@@ -1,4 +1,9 @@
-# Modified from https://github.com/openvla/openvla/blob/c8f03f48af692657d3060c19588038c7220e9af9/prismatic/vla/datasets/rlds/obs_transforms.py  # noqa: E501
+# Origin: Modified from
+# Upstream-Repo: openvla/openvla
+# Upstream-Path: prismatic/vla/datasets/rlds/obs_transforms.py
+# Upstream-Ref: c8f03f48af692657d3060c19588038c7220e9af9
+# SPDX-License-Identifier: MIT
+# Notes: Attribution normalized; no functional change.
 
 from typing import Any, Dict, List, Union
 

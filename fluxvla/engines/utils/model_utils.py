@@ -1,4 +1,8 @@
-# Modified from https://github.com/ZibinDong/openpi_pytorch/blob/main/pi0/utils.py  # noqa: E501
+# Origin: Modified from
+# Upstream-URL: https://github.com/ZibinDong/openpi_pytorch/blob/main/pi0/utils.py  # noqa: E501
+# Upstream-Ref: main
+# SPDX-License-Identifier: Apache-2.0
+# Notes: Attribution normalized and reused internal equivalents.
 
 import math
 from typing import Optional

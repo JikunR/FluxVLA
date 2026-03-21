@@ -15,7 +15,7 @@
 model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=  # noqa: E251
-    './checkpoints/pi0_base/model.safetensors',  # noqa: E501. Refer to https://github.com/ZibinDong/openpi_pytorch
+    './checkpoints/pi0_base/model.safetensors',  # noqa: E501
     vlm_backbone=dict(
         type='PaliGemma',
         vlm_backbone_id='paligemma_3b_pt_224',

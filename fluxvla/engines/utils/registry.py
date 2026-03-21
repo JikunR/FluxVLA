@@ -1,8 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 #
-# Source: https://github.com/open-mmlab/mmengine
-# Branch: main
-# Path: mmengine/registry/registry.py
+# Origin: Source
+# Upstream-Repo: open-mmlab/mmengine
+# Upstream-Path: mmengine/registry/registry.py
+# Upstream-Ref: main
+# SPDX-License-Identifier: Apache-2.0
+# Notes: Attribution normalized; no functional change.
 import inspect
 import logging
 import sys
