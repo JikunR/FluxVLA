@@ -171,9 +171,8 @@ def _flash_attn(self, x: torch.Tensor) -> torch.Tensor:
 
 
 def forward(self, x: torch.Tensor) -> torch.Tensor:
-    assert (
-        x.dtype == torch.bfloat16
-    ), 'Flash attention is only supported on A100 or H100 GPU during training due to head dim > 64 backward.'  # noqa: E501
+    if x.dtype != torch.bfloat16:
+        x = x.to(torch.bfloat16)
     result = self._flash_attn(x)
     return result
 
