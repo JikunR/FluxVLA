@@ -59,3 +59,7 @@ checkpoints/*
 
 # Ignore vscode directories
 .vscode/
+
+# Ignore local experiment directories
+sober/
+realtime-vla-pi05

@@ -20,9 +20,10 @@ import imageio
 import numpy as np
 import tensorflow as tf
 import torch
+from PIL import Image
+
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
-from PIL import Image
 
 OPENVLA_V01_SYSTEM_PROMPT = (
     'A chat between a curious user and an artificial intelligence assistant. '
