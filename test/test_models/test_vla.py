@@ -19,6 +19,7 @@ import unittest
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 from fluxvla.engines import build_vla_from_cfg, set_seed_everywhere
 
@@ -104,15 +105,18 @@ class TestOpenVLA(unittest.TestCase):
                                  dim=1)
         labels = torch.from_numpy(
             np.load('test/data/models/vlas/openvla/labels.npy')).cuda()
-        output, _ = self.vla.forward_model(input_ids, attention_mask,
-                                           pixel_values, labels)
+        with torch.no_grad():
+            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=True):
+                output, _ = self.vla.forward_model(input_ids, attention_mask,
+                                                   pixel_values.bfloat16(),
+                                                   labels)
         expected_loss = np.load('test/data/models/vlas/openvla/loss.npy')
         expected_logits = np.load('test/data/models/vlas/openvla/logits.npy')
         self.assertAlmostEqual(
             output['loss'].cpu().detach().numpy(), expected_loss, delta=1e-2)
         self.assertTrue(
             np.allclose(
-                output['logits'].cpu().detach().numpy()[:, ::10, ::10],
+                output['logits'].cpu().float().detach().numpy()[:, ::10, ::10],
                 expected_logits,
                 rtol=1e-3,
                 atol=1e-1))
@@ -136,14 +140,14 @@ class TestGr00t(unittest.TestCase):
                 'fluxvla/models/third_party_models/eagle2_hg_model'),
             vla_head=dict(
                 type='FlowMatchingHead',
-                state_dim=8,
+                state_dim=64,
                 hidden_size=1024,
                 input_embedding_dim=1536,
                 num_layers=1,
                 num_heads=4,
                 num_inference_timesteps=4,
                 traj_length=10,
-                action_dim=7,
+                action_dim=32,
                 ori_action_dim=7),
             freeze_vlm_backbone=False,
             name_mapping={
@@ -175,8 +179,10 @@ class TestGr00t(unittest.TestCase):
         lang_masks = torch.from_numpy(lang_masks).cuda()
         states = torch.from_numpy(
             np.load('test/data/models/vlas/llavavla/states.npy')).cuda()
+        states = F.pad(states, (0, 64 - states.shape[-1]))
         actions = torch.from_numpy(
             np.load('test/data/models/vlas/llavavla/actions.npy')).cuda()
+        actions = F.pad(actions, (0, 32 - actions.shape[-1]))
         embodiment_ids = torch.ones((2)).cuda().long()
         with torch.no_grad():
             with torch.autocast('cuda', dtype=torch.bfloat16, enabled=True):
@@ -191,7 +197,7 @@ class TestGr00t(unittest.TestCase):
                     embodiment_ids=embodiment_ids)
         self.assertTrue(
             np.allclose(
-                output['loss'].cpu().detach().numpy(), 2.629, atol=1e-2))
+                output['loss'].cpu().detach().numpy(), 0.5135, atol=1e-2))
 
     def test_predict_action(self):
         images = np.load(
@@ -212,6 +218,7 @@ class TestGr00t(unittest.TestCase):
         lang_masks = torch.from_numpy(lang_masks).cuda()
         states = torch.from_numpy(
             np.load('test/data/models/vlas/llavavla/states.npy')).cuda()
+        states = F.pad(states, (0, 64 - states.shape[-1]))
         pred_actions_target = np.load(
             'test/data/models/vlas/gr00t/pred_actions.npy', allow_pickle=True)
         embodiment_ids = torch.ones((2)).cuda().long()

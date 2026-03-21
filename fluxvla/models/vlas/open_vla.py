@@ -210,7 +210,7 @@ class OpenVLA(BaseVLA):
                 })
             else:
                 patch_features = self.vision_backbone(
-                    pixel_values[multimodal_indices].float())
+                    pixel_values[multimodal_indices])
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>>
         # num_patches = (2 *) (256 + 1) for ViT-L + CLS

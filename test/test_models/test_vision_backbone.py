@@ -46,7 +46,8 @@ class TestHFCausalVisionBackbone(unittest.TestCase):
                 model_id='siglip_224',
                 file=  # noqa: E251
                 SIGLIP_CKPT_PATH))
-        self.siglip_vit = build_vision_backbone_from_cfg(self.cfg).cuda()
+        self.siglip_vit = build_vision_backbone_from_cfg(self.cfg).cuda().to(
+            torch.bfloat16)
 
     @pytest.mark.skipif(
         condition=torch.cuda.is_available() is False,
@@ -54,13 +55,14 @@ class TestHFCausalVisionBackbone(unittest.TestCase):
     def test_siglip_vit_forward(self):
         input_dino = torch.from_numpy(
             np.load(
-                'test/data/models/vision_backbones/input_dino.npy')).cuda()
+                'test/data/models/vision_backbones/input_dino.npy')).cuda().to(
+                    torch.bfloat16)
 
         input_siglip = torch.from_numpy(
-            np.load(
-                'test/data/models/vision_backbones/input_siglip.npy')).cuda()
+            np.load('test/data/models/vision_backbones/input_siglip.npy')
+        ).cuda().to(torch.bfloat16)
         pixel_values = torch.cat([input_dino, input_siglip], dim=1)
-        output = self.siglip_vit(pixel_values)
+        output = self.siglip_vit(pixel_values).float()
         expected_output = torch.from_numpy(
             np.load(
                 'test/data/models/vision_backbones/output_dinosiglipvit.npy')
