@@ -17,9 +17,9 @@ from typing import Any, Dict, List, Union
 
 import numpy as np
 import torch
-from datasets import concatenate_datasets, load_dataset
 from torch.utils.data import Dataset
 
+from datasets import concatenate_datasets, load_dataset
 from fluxvla.engines import DATASETS, build_transform_from_cfg
 
 
