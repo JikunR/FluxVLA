@@ -4,6 +4,12 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 
+# Origin: Source
+# Upstream-URL: https://github.com/NVIDIA/Isaac-GR00T/blob/n1.5-release/gr00t/model/backbone/eagle2_hg_model/image_processing_eagle2_5_vl_fast.py
+# Upstream-Ref: n1.5-release
+# SPDX-License-Identifier: MIT
+# Notes: Attribution normalized; no functional change.
+
 from functools import partial
 # copy from https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava_onevision/image_processing_llava_onevision_fast.py
 from typing import List, Optional, Union

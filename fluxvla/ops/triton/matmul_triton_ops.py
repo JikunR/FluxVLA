@@ -79,14 +79,14 @@ def matmul_small_bias_res(inp_ptr, weight_ptr, out_ptr, bias_ptr, res_ptr,
                 (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
                 mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
                 ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
-                other=0.0)
+                other=0.0).to(tl.bfloat16)
             w = tl.load(
                 weight_ptr +
                 (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
                 (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
                 mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
                 ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
-                other=0.0)
+                other=0.0).to(tl.bfloat16)
             acc = tl.dot(x, w, acc)
         tl.store(
             out_ptr + (i + tl.arange(0, BLOCK_SIZE_N))[:, None] * hidden +
@@ -265,14 +265,14 @@ def matmul_small_bias_gelu(inp_ptr, weight_ptr, out_ptr, bias_ptr,
                 (k + tl.arange(0, BLOCK_SIZE_K))[None, :],
                 mask=((i + tl.arange(0, BLOCK_SIZE_N))[:, None] < seq_len) &
                 ((k + tl.arange(0, BLOCK_SIZE_K))[None, :] < features),
-                other=0.0)
+                other=0.0).to(tl.bfloat16)
             w = tl.load(
                 weight_ptr +
                 (k + tl.arange(0, BLOCK_SIZE_K))[:, None] * hidden +
                 (j + tl.arange(0, BLOCK_SIZE_M))[None, :],
                 mask=((k + tl.arange(0, BLOCK_SIZE_K))[:, None] < features) &
                 ((j + tl.arange(0, BLOCK_SIZE_M))[None, :] < hidden),
-                other=0.0)
+                other=0.0).to(tl.bfloat16)
             acc = tl.dot(x, w, acc)
         acc = acc * tl.sigmoid(1.5957691216057308 * acc *
                                (1 + 0.044715 * acc * acc))
@@ -375,6 +375,136 @@ def combine_1536_1152_twopart(out_ptr, inp_ptr, seq_len: tl.constexpr,
         tl.store(
             out_ptr + (i + tl.arange(0, 2)[:, None]) * hidden + 1024 +
             tl.arange(0, 128), inp.to(tl.bfloat16))
+
+
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=3,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 256,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=2,
+            num_warps=8),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=3,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=3,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=3,
+            num_warps=8),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 128,
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=3,
+            num_warps=8),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 128,
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=2,
+            num_warps=8),
+    ],
+    key=['seq_len', 'features', 'hidden'],
+)
+@triton.jit
+def qwen3_mlp_gate_up_silu_kernel(inp_ptr, gate_w_ptr, up_w_ptr, out_ptr,
+                                  seq_len, features, hidden,
+                                  BLOCK_SIZE_N: tl.constexpr,
+                                  BLOCK_SIZE_M: tl.constexpr,
+                                  BLOCK_SIZE_K: tl.constexpr):
+    """Fused gate+up projection with SiLU and element-wise multiply.
+
+    out = silu(inp @ gate_w.T) * (inp @ up_w.T)
+    Weight layout: (out_features, in_features), PyTorch nn.Linear native.
+    """
+    pid = tl.program_id(0)
+    num_pid_n = tl.cdiv(seq_len, BLOCK_SIZE_N)
+    num_pid_m = tl.cdiv(hidden, BLOCK_SIZE_M)
+
+    GROUP_SIZE: tl.constexpr = 8
+    num_pid_in_group = GROUP_SIZE * num_pid_m
+    group_id = pid // num_pid_in_group
+    first_pid_n = group_id * GROUP_SIZE
+    group_size_n = min(num_pid_n - first_pid_n, GROUP_SIZE)
+    pid_n = first_pid_n + (pid % group_size_n)
+    pid_m = (pid % num_pid_in_group) // group_size_n
+
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    mask_n = offs_n[:, None] < seq_len
+    mask_m = offs_m[:, None] < hidden
+
+    gate_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    up_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+
+    inp_base = inp_ptr + offs_n[:, None] * features
+    gw_base = gate_w_ptr + offs_m[:, None] * features
+    uw_base = up_w_ptr + offs_m[:, None] * features
+
+    for k in range(0, features, BLOCK_SIZE_K):
+        offs_k = k + tl.arange(0, BLOCK_SIZE_K)
+        mask_k = offs_k[None, :] < features
+        x = tl.load(
+            inp_base + offs_k[None, :], mask=mask_n & mask_k, other=0.0)
+        gw = tl.load(
+            gw_base + offs_k[None, :], mask=mask_m & mask_k, other=0.0)
+        uw = tl.load(
+            uw_base + offs_k[None, :], mask=mask_m & mask_k, other=0.0)
+        gate_acc = tl.dot(x, tl.trans(gw), gate_acc)
+        up_acc = tl.dot(x, tl.trans(uw), up_acc)
+
+    result = (gate_acc * tl.sigmoid(gate_acc)) * up_acc
+    out_ptrs = out_ptr + offs_n[:, None] * hidden + offs_m[None, :]
+    out_mask = (offs_n[:, None] < seq_len) & (offs_m[None, :] < hidden)
+    tl.store(out_ptrs, result.to(tl.bfloat16), mask=out_mask)
 
 
 @triton.jit

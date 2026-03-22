@@ -43,28 +43,33 @@ inference_model = dict(
     pretrained_name_or_path=  # noqa: E251
     './checkpoints/GR00T-N1.5-3B',
     vlm_backbone=dict(
-        type='EagleBackbone',
-        dtype=None,
+        type='EagleInferenceBackbone',
         vlm_path=  # noqa: E251
         'fluxvla/models/third_party_models/eagle2_hg_model'),
     vla_head=dict(
-        type='FlowMatchingHead',
+        type='FlowMatchingInferenceHead',
         state_dim=64,
         hidden_size=1024,
         input_embedding_dim=1536,
         num_layers=1,
         num_heads=4,
-        num_steps=32,
         num_inference_timesteps=4,
         traj_length=10,
         action_dim=32,
-        ori_action_dim=7),
-    freeze_vlm_backbone=False,
-    name_mapping={
-        'vlm_backbone.vlm': 'backbone.eagle_model',
-        'vla_head': 'action_head'
-    },
-    freeze_projector=False)
+        num_steps=32,
+        ori_action_dim=7,
+        diffusion_model_cfg=dict(
+            attention_head_dim=48,
+            cross_attention_dim=2048,
+            dropout=0.2,
+            final_dropout=True,
+            interleave_self_attention=True,
+            norm_type='ada_norm',
+            num_attention_heads=32,
+            num_layers=16,
+            output_dim=1024,
+            use_torch_compile=True,
+            positional_embeddings=None)))
 
 train_dataloader = dict(
     per_device_batch_size=8,
@@ -164,28 +169,23 @@ inference = dict(
     type='URInferenceRunner',
     seed=7,
     action_chunk=32,
-    task_descriptions={
-        '1': 'put the measuring cylinder back on the tabletop',
-        '2': 'place the erlenmeyer flask back on the tabletop',
-        '3': 'grasp the measuring cylinder',
-        '4': 'grasp the neck of the erlenmeyer flask',
-        '5':
-        'pour the liquid in the transparent wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
-        '6': 'put the transparent wide-mouth bottle back on the tabletop',
-        '7': 'shake the erlenmeyer flask',
-        '8':
-        'pour the liquid in the measuring cylinder into the erlenmeyer flask',
-        '9': 'place the bottle stopper upside down on the tabletop',
-        '10': 'empty',
-        '11': 'grasp the stopper of the transparent wide-mouth bottle',
-        '12': 'grasp the body of the transparent wide-mouth bottle',
-        '13': 'grasp the body of the dark-colored wide-mouth bottle',
-        '14': 'grasp the stopper of the dark-colored wide-mouth bottle',
-        '15':
-        'pour the liquid in the dark-colored wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
-        '16': 'put the dark-colored wide-mouth bottle back on the tabletop'
-    },
     mixed_precision_dtype='bf16',
+    publish_rate=60,
+    task_descriptions={
+        '1': 'grasp the stopper of the dark-colored wide-mouth bottle',
+        '2': 'place the bottle stopper upside down on the tabletop',
+        '3': 'grasp the body of the dark-colored wide-mouth bottle',
+        '4':
+        'pour the liquid in the dark-colored wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
+        '5': 'put the dark-colored wide-mouth bottle back on the tabletop',
+        '6': 'grasp the measuring cylinder',
+        '7':
+        'pour the liquid in the measuring cylinder into the erlenmeyer flask',
+        '8': 'put the measuring cylinder back on the tabletop',
+        '9': 'grasp the neck of the erlenmeyer flask',
+        '10': 'shake the erlenmeyer flask',
+        '11': 'place the erlenmeyer flask back on the tabletop',
+    },
     dataset=dict(
         type='PrivateInferenceDataset',
         embodiment_id=2,

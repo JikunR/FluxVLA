@@ -28,7 +28,8 @@ def make_cuda_ext(name,
                   sources,
                   sources_cuda=[],
                   extra_args=[],
-                  extra_include_path=[]):
+                  extra_include_path=[],
+                  extra_libraries=[]):
 
     define_macros = []
     extra_compile_args = {'cxx': [] + extra_args}
@@ -53,6 +54,7 @@ def make_cuda_ext(name,
         include_dirs=extra_include_path,
         define_macros=define_macros,
         extra_compile_args=extra_compile_args,
+        libraries=extra_libraries,
     )
 
 
@@ -83,6 +85,13 @@ setup(
             module='fluxvla.ops.cuda.rotary_pos_embedding',
             sources=['src/rotary_pos_embedding_forward.cpp'],
             sources_cuda=['src/rotary_pos_embedding_forward_cuda.cu'],
+        ),
+        make_cuda_ext(
+            name='matmul_bias_ext',
+            module='fluxvla.ops.cuda.matmul_bias',
+            sources=['src/matmul_bias_forward.cpp'],
+            sources_cuda=['src/matmul_bias_forward_cuda.cu'],
+            extra_libraries=['cublasLt'],
         ),
     ],
     cmdclass={'build_ext': BuildExtension},

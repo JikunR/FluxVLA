@@ -23,7 +23,6 @@ repos:
       - id: check-yaml
       - id: end-of-file-fixer
         exclude: 'fluxvla/models/third_party_models/eagle2_hg_model/'
-      - id: requirements-txt-fixer
       - id: double-quote-string-fixer
       - id: check-merge-conflict
       - id: fix-encoding-pragma

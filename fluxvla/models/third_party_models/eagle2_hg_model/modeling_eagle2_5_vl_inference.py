@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
+import triton
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from transformers import GenerationConfig
@@ -25,11 +26,13 @@ from transformers.models.siglip.modeling_siglip import SiglipVisionModel
 from fluxvla.engines.utils.overwatch import initialize_overwatch
 from fluxvla.models.third_party_models.eagle2_hg_model.modeling_eagle2_5_vl import \
     Eagle2_5_VLPreTrainedModel  # noqa: E501
-from fluxvla.ops import (combine_1536_1152_twopart, layer_norm_small_kernel,
-                         matmul_512x1152x1152_twopart_bias_res,
-                         matmul_small_bias, matmul_small_bias_gelu,
-                         matmul_small_bias_res, matmul_small_bias_res_mod,
-                         matmul_split_k, merge_split_k_bias_res)
+from fluxvla.ops import (linear_split_qkv_kernel,
+                         qwen3_mlp_gate_up_silu_kernel, qwen3_rmsnorm_kernel)
+from fluxvla.ops.atomic_ops import (AttnMultiKey, conv2d_embed_res,
+                                   layer_norm_QKV_matmul_bias,
+                                   layer_norm_matmul_bias_gelu,
+                                   matmul_bias_res, matmul_split_k_bias_res)
+from fluxvla.ops.cuda.rotary_pos_embedding import rotary_pos_embedding_cuda
 from .configuration_eagle2_5_vl import Eagle2_5_VLConfig
 from .radio_model import RADIOModel
 
@@ -53,135 +56,6 @@ EAGLE2_5_VL_START_DOCSTRING = r"""
 """
 
 
-def conv2d_embed_n256_1152_res(images, patch_w, patch_b, pos_emb, out):
-    nviews = images.shape[0]
-    img_input = images.view(nviews, 16, 14, 16, 14,
-                            3).permute(0, 1, 3, 2, 4, 5).contiguous()
-    matmul_small_bias_res_mod[(256 * nviews // 64) * (1152 // 64), ](
-        img_input,
-        patch_w,
-        out,
-        patch_b,
-        pos_emb,
-        seq_len=256 * nviews,
-        features=3 * 14 * 14,
-        hidden=1152,
-        i_mod=256,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_K=32)
-
-
-def layer_norm_QKV_matmul_n256_1152_3456_bias(x, norm_w, norm_b, qkv_w, qkv_b,
-                                              out, x_norm):
-    num_views = x.shape[0]
-    seq_len = 256 * num_views
-    layer_norm_small_kernel[seq_len, ](
-        x, x_norm, norm_w, norm_b, seq_len=seq_len, features=1152)
-
-    matmul_small_bias[((seq_len + 63) // 64) * (3456 // 64), ](
-        x_norm,
-        qkv_w,
-        out,
-        qkv_b,
-        seq_len=seq_len,
-        features=1152,
-        hidden=3456,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_K=32)
-
-
-@torch.compile
-def AttnMultiKey(QKV):
-    QKV = QKV.view(-1, 256, 3, 16, 72).permute(0, 2, 3, 1, 4)
-    Q = QKV[:, 0]
-    K = QKV[:, 1]
-    V = QKV[:, 2]
-    attn = torch.nn.functional.scaled_dot_product_attention(Q, K, V)
-    attn = attn.transpose(1, 2).reshape(Q.shape[0], 256, 1152)
-    return attn
-
-
-def matmul_n256_1152_1152_bias_res(x, weight, bias, res, out, buf):
-    num_views = x.shape[0]
-    if num_views == 2:
-        matmul_512x1152x1152_twopart_bias_res[(256, )](
-            old_ptr=res,
-            inp_ptr=x,
-            weight_ptr=weight,
-            bias_ptr=bias,
-            out_ptr=out,
-            out2_ptr=buf,
-            seq_len=512,
-            features=1152,
-            hidden=1152,
-        )
-        combine_1536_1152_twopart[(256, )](
-            inp_ptr=buf,
-            out_ptr=out,
-            seq_len=512,
-            hidden=1152,
-        )
-        return
-    seq_len = 256 * num_views
-    matmul_small_bias_res[((seq_len + 31) // 32) * (1152 // 64), ](
-        x,
-        weight,
-        out,
-        bias,
-        res,
-        seq_len=seq_len,
-        features=1152,
-        hidden=1152,
-        BLOCK_SIZE_N=32,
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_K=32)
-
-
-def layer_norm_matmul_n256_1152_4304_bias_gelu(x, norm_w, norm_b, weight, bias,
-                                               out, x_norm):
-    num_views = x.shape[0]
-    seq_len = 256 * num_views
-
-    layer_norm_small_kernel[seq_len, ](
-        x, x_norm, norm_w, norm_b, seq_len=seq_len, features=1152)
-
-    BLOCK_SIZE_N = 64
-    BLOCK_SIZE_M = 64
-    BLOCK_SIZE_K = 64
-    matmul_small_bias_gelu[((seq_len + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N) *
-                           ((4304 + (BLOCK_SIZE_M - 1)) // BLOCK_SIZE_M), ](
-                               x_norm,
-                               weight,
-                               out,
-                               bias,
-                               seq_len=seq_len,
-                               features=1152,
-                               hidden=4304,
-                               BLOCK_SIZE_N=BLOCK_SIZE_N,
-                               BLOCK_SIZE_M=BLOCK_SIZE_M,
-                               BLOCK_SIZE_K=BLOCK_SIZE_K)
-
-
-def matmul_n256_4304_1152_bias_res(x, weight, bias, res, out, buf):
-    num_views = x.shape[0]
-    seq_len = 256 * num_views
-    matmul_split_k[((seq_len + 64) // 64) * (1152 // 64) * 4, ](
-        x,
-        weight,
-        buf,
-        seq_len=seq_len,
-        features=4304,
-        hidden=1152,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_K=64,
-        SPLIT_K=4)
-    merge_split_k_bias_res[(seq_len * 1152 + 1023) // 1024, ](
-        buf, bias, res, out, seq_len=seq_len, hidden=1152, SPLIT_K=4)
-
-
 def qwen3_rmsnorm(hidden_states, weight, eps):
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
@@ -197,26 +71,62 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin):
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+    # Concat q,k along head dim to apply rotary via CUDA kernel in one launch
+    # q: [batch, num_q_heads, seq, dim], k: [batch, num_kv_heads, seq, dim]
+    # cos/sin: [batch, seq, dim] (3D, no head dim)
+    num_q_heads = q.shape[1]
+    qk = torch.cat([q, k], dim=1).contiguous()
+    cos_c = cos.contiguous()
+    sin_c = sin.contiguous()
+    # CUDA kernel q-path handles 4D [batch, heads, pos, dim] correctly;
+    # pass cos_c as dummy k (3D [batch, pos, dim]), its k_embed output
+    # is discarded
+    qk_embed, _ = rotary_pos_embedding_cuda(qk, cos_c, cos_c, sin_c)
+    return qk_embed[:, :num_q_heads], qk_embed[:, num_q_heads:]
 
 
 def qwen3_attn(hidden_states, cos, sin, attention_mask, position_ids, head_dim,
-               num_kv_groups, q_w, k_w, v_w, o_w, q_norm_w, k_norm_w, eps,
+               num_kv_groups, qkv_w, o_w, q_norm_w, k_norm_w, eps,
                attn_implementation):
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, head_dim)
-    query_states = qwen3_rmsnorm(
-        F.linear(hidden_states, q_w).view(hidden_shape), q_norm_w,
-        eps).transpose(1, 2)
-    key_states = qwen3_rmsnorm(
-        F.linear(hidden_states, k_w).view(hidden_shape), k_norm_w,
-        eps).transpose(1, 2)
-    value_states = F.linear(hidden_states,
-                            v_w).view(hidden_shape).transpose(1, 2)
+
+    seq_len = hidden_states.shape[1]
+    in_features = hidden_states.shape[2]
+    out_features = qkv_w.shape[1]
+    kv_dim = out_features // (num_kv_groups + 2)
+    q_dim = num_kv_groups * kv_dim
+
+    hidden_2d = hidden_states.view(-1, in_features)
+    query_states = hidden_2d.new_empty(seq_len, q_dim)
+    key_states = hidden_2d.new_empty(seq_len, kv_dim)
+    value_states = hidden_2d.new_empty(seq_len, kv_dim)
+
+    def _qkv_grid(META):
+        return (triton.cdiv(seq_len, META['BLOCK_N']) *
+                triton.cdiv(out_features, META['BLOCK_M']), )
+
+    linear_split_qkv_kernel[_qkv_grid](
+        hidden_2d,
+        qkv_w,
+        q_norm_w,
+        k_norm_w,
+        query_states,
+        key_states,
+        value_states,
+        q_dim,
+        kv_dim,
+        seq_len,
+        in_features,
+        out_features,
+        norm_num_features=head_dim,
+        BLOCK_M=head_dim)
+
+    query_states = query_states.view(hidden_shape).transpose(1, 2)
+
+    key_states = key_states.view(hidden_shape).transpose(1, 2)
+
+    value_states = value_states.view(hidden_shape).transpose(1, 2)
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin)
@@ -227,7 +137,6 @@ def qwen3_attn(hidden_states, cos, sin, attention_mask, position_ids, head_dim,
     attn_output = F.scaled_dot_product_attention(
         query_states, key_states, value_states, attn_mask=attention_mask)
 
-    # sdpa returns (B, H, S, D), transpose then reshape to (B, S, H*D)
     attn_output = attn_output.transpose(1, 2).reshape(*input_shape,
                                                       -1).contiguous()
     attn_output = F.linear(attn_output, o_w)
@@ -235,26 +144,61 @@ def qwen3_attn(hidden_states, cos, sin, attention_mask, position_ids, head_dim,
 
 
 def qwen3_mlp(hidden_states, gate_w, up_w, down_w):
-    return F.linear(
-        F.silu(F.linear(hidden_states, gate_w)) *
-        F.linear(hidden_states, up_w), down_w)
+    orig_shape = hidden_states.shape
+    features = orig_shape[-1]
+    seq_len = hidden_states.numel() // features
+    intermediate_size = gate_w.shape[0]
+
+    inp = hidden_states.reshape(seq_len, features).contiguous()
+    intermediate = torch.empty(
+        seq_len, intermediate_size, dtype=inp.dtype, device=inp.device)
+
+    def grid(META):
+        return (triton.cdiv(seq_len, META['BLOCK_SIZE_N']) *
+                triton.cdiv(intermediate_size, META['BLOCK_SIZE_M']), )
+
+    qwen3_mlp_gate_up_silu_kernel[grid](inp, gate_w, up_w, intermediate,
+                                        seq_len, features, intermediate_size)
+
+    output = F.linear(intermediate, down_w)
+    return output.reshape(*orig_shape[:-1], -1)
 
 
 def qwen3_decoder_layer(hidden_states, cos, sin, attention_mask, position_ids,
                         head_dim, num_kv_groups, eps, input_layernorm_w,
-                        post_attn_layernorm_w, q_w, k_w, v_w, o_w, q_norm_w,
-                        k_norm_w, gate_w, up_w, down_w, attn_implementation):
+                        post_attn_layernorm_w, qkv_w, o_w, q_norm_w, k_norm_w,
+                        gate_w, up_w, down_w, attn_implementation):
     residual = hidden_states
-    hidden_states = qwen3_rmsnorm(hidden_states, input_layernorm_w, eps)
+    feat_dim = hidden_states.shape[-1]
+    rows = hidden_states.numel() // feat_dim
+    norm_out = torch.empty_like(hidden_states)
+    qwen3_rmsnorm_kernel[rows, ](
+        hidden_states,
+        norm_out,
+        input_layernorm_w,
+        seq_len=rows,
+        feat_dim=feat_dim,
+        eps=eps)
+    hidden_states = norm_out
     hidden_states = qwen3_attn(hidden_states, cos, sin, attention_mask,
-                               position_ids, head_dim, num_kv_groups, q_w, k_w,
-                               v_w, o_w, q_norm_w, k_norm_w, eps,
+                               position_ids, head_dim, num_kv_groups, qkv_w,
+                               o_w, q_norm_w, k_norm_w, eps,
                                attn_implementation)
     hidden_states = residual + hidden_states
 
     # Fully Connected
     residual = hidden_states
-    hidden_states = qwen3_rmsnorm(hidden_states, post_attn_layernorm_w, eps)
+    feat_dim = hidden_states.shape[-1]
+    rows = hidden_states.numel() // feat_dim
+    norm_out = torch.empty_like(hidden_states)
+    qwen3_rmsnorm_kernel[rows, ](
+        hidden_states,
+        norm_out,
+        post_attn_layernorm_w,
+        seq_len=rows,
+        feat_dim=feat_dim,
+        eps=eps)
+    hidden_states = norm_out
     hidden_states = qwen3_mlp(hidden_states, gate_w, up_w, down_w)
     hidden_states = residual + hidden_states
 
@@ -360,66 +304,102 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
 
         self.check_forward_kwargs()
 
+        # Vision encoder dimensions from config
+        vit_cfg = config.vision_config
+        image_size = config.force_image_size or vit_cfg.image_size
+        self.vit_patch_size = vit_cfg.patch_size
+        self.vit_grid_size = image_size // self.vit_patch_size
+        self.vit_num_patches = self.vit_grid_size**2
+        self.vit_hidden = vit_cfg.hidden_size
+        self.vit_intermediate = vit_cfg.intermediate_size
+        self.vit_num_heads = vit_cfg.num_attention_heads
+        self.vit_head_dim = self.vit_hidden // self.vit_num_heads
+        self.vit_num_layers = vit_cfg.num_hidden_layers
+        self.vit_image_size = image_size
+        self.vit_qkv_hidden = 3 * self.vit_hidden
+
+        # Language model dimensions from config
+        lang_cfg = config.text_config
+        self.lang_hidden = lang_cfg.hidden_size
+        self.lang_intermediate = lang_cfg.intermediate_size
+        self.lang_num_layers = lang_cfg.num_hidden_layers
+        self.lang_num_heads = lang_cfg.num_attention_heads
+        self.lang_num_kv_heads = lang_cfg.num_key_value_heads
+        self.lang_head_dim = getattr(lang_cfg, 'head_dim',
+                                     self.lang_hidden // self.lang_num_heads)
+        self.lang_num_kv_groups = (
+            self.lang_num_heads // self.lang_num_kv_heads)
+        self.lang_qkv_dim = (
+            (self.lang_num_heads + 2 * self.lang_num_kv_heads) *
+            self.lang_head_dim)
+        self.lang_max_seq_len = getattr(config, 'max_input_seq_len', 600)
+
+        vh = self.vit_hidden
+        vi = self.vit_intermediate
+        vl = self.vit_num_layers
+        np_ = self.vit_num_patches
+        ps = self.vit_patch_size
+        lh = self.lang_hidden
+        li = self.lang_intermediate
+        ll = self.lang_num_layers
+        lqkv = self.lang_qkv_dim
+        lhd = self.lang_head_dim
+
         self.weights = {
             'vision_patch_embedding_w':
-            torch.empty(14, 14, 3, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ps, ps, 3, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_patch_embedding_b':
-            torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vh, dtype=torch.bfloat16, device='cuda'),
             'vision_position_embedding':
-            torch.empty(256, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(np_, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_attn_qkv_w':
-            torch.empty(
-                27, 1152, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, 3 * vh, dtype=torch.bfloat16, device='cuda'),
             'vision_attn_qkv_b':
-            torch.empty(27, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, 3 * vh, dtype=torch.bfloat16, device='cuda'),
             'vision_attn_o_w':
-            torch.empty(27, 1152, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_attn_o_b':
-            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_ffn_up_w':
-            torch.empty(27, 1152, 4304, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, vi, dtype=torch.bfloat16, device='cuda'),
             'vision_ffn_up_b':
-            torch.empty(27, 4304, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vi, dtype=torch.bfloat16, device='cuda'),
             'vision_ffn_down_w':
-            torch.empty(27, 4304, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vi, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_ffn_down_b':
-            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_pre_attn_norm_w':
-            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_pre_attn_norm_b':
-            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_pre_ffn_norm_w':
-            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_pre_ffn_norm_b':
-            torch.empty(27, 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_final_norm_w':
-            torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vh, dtype=torch.bfloat16, device='cuda'),
             'vision_final_norm_b':
-            torch.empty(1152, dtype=torch.bfloat16, device='cuda'),
-            'language_attn_q_w':
-            torch.empty(12, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
-            'language_attn_k_w':
-            torch.empty(12, 1024, 2048, dtype=torch.bfloat16, device='cuda'),
-            'language_attn_v_w':
-            torch.empty(12, 1024, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vh, dtype=torch.bfloat16, device='cuda'),
+            'language_attn_qkv_w':
+            torch.empty(ll, lh, lqkv, dtype=torch.bfloat16, device='cuda'),
             'language_attn_o_w':
-            torch.empty(12, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, lh, lh, dtype=torch.bfloat16, device='cuda'),
             'language_attn_q_norm_w':
-            torch.empty(12, 128, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, lhd, dtype=torch.bfloat16, device='cuda'),
             'language_attn_k_norm_w':
-            torch.empty(12, 128, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, lhd, dtype=torch.bfloat16, device='cuda'),
             'language_gate_proj_w':
-            torch.empty(12, 6144, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, li, lh, dtype=torch.bfloat16, device='cuda'),
             'language_up_proj_w':
-            torch.empty(12, 6144, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, li, lh, dtype=torch.bfloat16, device='cuda'),
             'language_down_proj_w':
-            torch.empty(12, 2048, 6144, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, lh, li, dtype=torch.bfloat16, device='cuda'),
             'language_input_layernorm_w':
-            torch.empty(12, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, lh, dtype=torch.bfloat16, device='cuda'),
             'language_post_attn_layernorm_w':
-            torch.empty(12, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(ll, lh, dtype=torch.bfloat16, device='cuda'),
             'language_norm_w':
-            torch.empty(2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(lh, dtype=torch.bfloat16, device='cuda'),
         }
 
         self.loaded_weights = False
@@ -471,6 +451,16 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
         self.use_llm_lora = True
 
     def _load_weights_and_buffer(self, num_views):
+        vl = self.vit_num_layers
+        ll = self.lang_num_layers
+        np_ = self.vit_num_patches
+        vh = self.vit_hidden
+        vi = self.vit_intermediate
+        lh = self.lang_hidden
+        lhd = self.lang_head_dim
+        msl = self.lang_max_seq_len
+        img_sz = self.vit_image_size
+
         self.weights['vision_patch_embedding_w'].copy_(
             self.vision_model.vision_model.embeddings.patch_embedding.weight.
             permute(2, 3, 1, 0))
@@ -487,7 +477,7 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
                     layers[i].self_attn.k_proj.weight, self.vision_model.
                     vision_model.encoder.layers[i].self_attn.v_proj.weight
                 ],
-                          dim=0).permute(1, 0) for i in range(27)
+                          dim=0).permute(1, 0) for i in range(vl)
             ]))
         self.weights['vision_attn_qkv_b'].copy_(
             torch.stack([
@@ -497,160 +487,160 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
                     layers[i].self_attn.k_proj.bias, self.vision_model.
                     vision_model.encoder.layers[i].self_attn.v_proj.bias
                 ],
-                          dim=0) for i in range(27)
+                          dim=0) for i in range(vl)
             ]))
         self.weights['vision_attn_o_w'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].self_attn.
-                out_proj.weight.permute(1, 0) for i in range(27)
+                out_proj.weight.permute(1, 0) for i in range(vl)
             ]))
         self.weights['vision_attn_o_b'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].self_attn.
-                out_proj.bias for i in range(27)
+                out_proj.bias for i in range(vl)
             ]))
         self.weights['vision_ffn_up_w'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].mlp.fc1.weight
-                for i in range(27)
+                for i in range(vl)
             ]).permute(0, 2, 1))
         self.weights['vision_ffn_up_b'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].mlp.fc1.bias
-                for i in range(27)
+                for i in range(vl)
             ]))
         self.weights['vision_ffn_down_w'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].mlp.fc2.weight
-                for i in range(27)
+                for i in range(vl)
             ]).permute(0, 2, 1))
         self.weights['vision_ffn_down_b'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].mlp.fc2.bias
-                for i in range(27)
+                for i in range(vl)
             ]))
         self.weights['vision_pre_attn_norm_w'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].layer_norm1.
-                weight for i in range(27)
+                weight for i in range(vl)
             ]))
         self.weights['vision_pre_attn_norm_b'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].layer_norm1.
-                bias for i in range(27)
+                bias for i in range(vl)
             ]))
         self.weights['vision_pre_ffn_norm_w'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].layer_norm2.
-                weight for i in range(27)
+                weight for i in range(vl)
             ]))
         self.weights['vision_pre_ffn_norm_b'].copy_(
             torch.stack([
                 self.vision_model.vision_model.encoder.layers[i].layer_norm2.
-                bias for i in range(27)
+                bias for i in range(vl)
             ]))
         self.weights['vision_final_norm_w'].copy_(
             self.vision_model.vision_model.post_layernorm.weight)
         self.weights['vision_final_norm_b'].copy_(
             self.vision_model.vision_model.post_layernorm.bias)
 
-        self.weights['language_attn_q_w'].copy_(
+        layers = self.language_model.model.layers
+        self.weights['language_attn_qkv_w'].copy_(
             torch.stack([
-                self.language_model.model.layers[i].self_attn.q_proj.weight
-                for i in range(12)
-            ]))
-        self.weights['language_attn_k_w'].copy_(
-            torch.stack([
-                self.language_model.model.layers[i].self_attn.k_proj.weight
-                for i in range(12)
-            ]))
-        self.weights['language_attn_v_w'].copy_(
-            torch.stack([
-                self.language_model.model.layers[i].self_attn.v_proj.weight
-                for i in range(12)
-            ]))
+                torch.cat([
+                    layers[i].self_attn.q_proj.weight,
+                    layers[i].self_attn.k_proj.weight,
+                    layers[i].self_attn.v_proj.weight,
+                ],
+                          dim=0) for i in range(ll)
+            ]).permute(0, 2, 1))
         self.weights['language_attn_o_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].self_attn.o_proj.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_attn_q_norm_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].self_attn.q_norm.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_attn_k_norm_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].self_attn.k_norm.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_gate_proj_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].mlp.gate_proj.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_up_proj_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].mlp.up_proj.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_down_proj_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].mlp.down_proj.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_input_layernorm_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].input_layernorm.weight
-                for i in range(12)
+                for i in range(ll)
             ]))
         self.weights['language_post_attn_layernorm_w'].copy_(
             torch.stack([
                 self.language_model.model.layers[i].post_attention_layernorm.
-                weight for i in range(12)
+                weight for i in range(ll)
             ]))
         self.weights['language_norm_w'].copy_(
             self.language_model.model.norm.weight)
         self.buffers = {
             'observation_images_normalized':
             torch.empty(
-                num_views, 224, 224, 3, dtype=torch.bfloat16, device='cuda'),
+                num_views,
+                img_sz,
+                img_sz,
+                3,
+                dtype=torch.bfloat16,
+                device='cuda'),
             'vision_x':
             torch.empty(
-                num_views, 256, 1152, dtype=torch.bfloat16, device='cuda'),
+                num_views, np_, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_x_norm':
             torch.empty(
-                num_views, 256, 1152, dtype=torch.bfloat16, device='cuda'),
+                num_views, np_, vh, dtype=torch.bfloat16, device='cuda'),
             'vision_QKV':
             torch.empty(
-                num_views, 256, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+                num_views, np_, 3 * vh, dtype=torch.bfloat16, device='cuda'),
             'vision_hidden':
             torch.empty(
-                num_views, 256, 4304, dtype=torch.bfloat16, device='cuda'),
+                num_views, np_, vi, dtype=torch.bfloat16, device='cuda'),
             'vision_x_split_k_buf':
-            torch.empty((num_views * 256 * 1152 * 4, ),
+            torch.empty((num_views * np_ * vh * 4, ),
                         dtype=torch.float32,
                         device='cuda'),
             'language_x':
-            torch.empty(1, 600, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(1, msl, lh, dtype=torch.bfloat16, device='cuda'),
             'language_x_norm':
-            torch.empty(1, 600, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(1, msl, lh, dtype=torch.bfloat16, device='cuda'),
             'language_QKV':
-            torch.empty(1, 256, 3 * 1152, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(1, np_, 3 * vh, dtype=torch.bfloat16, device='cuda'),
             'language_hidden':
-            torch.empty(1, 256, 4304, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(1, np_, vi, dtype=torch.bfloat16, device='cuda'),
             'language_x_split_k_buf':
-            torch.empty((1 * 256 * 1152 * 4, ),
+            torch.empty((1 * np_ * vh * 4, ),
                         dtype=torch.float32,
                         device='cuda'),
             'language_cos':
-            torch.empty(1, 600, 128, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(1, msl, lhd, dtype=torch.bfloat16, device='cuda'),
             'language_sin':
-            torch.empty(1, 600, 128, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(1, msl, lhd, dtype=torch.bfloat16, device='cuda'),
             'position_ids':
-            torch.empty(1, 600, dtype=torch.long, device='cuda'),
+            torch.empty(1, msl, dtype=torch.long, device='cuda'),
             'attention_mask':
-            torch.empty(1, 1, 600, 600, dtype=torch.bfloat16, device='cuda')
+            torch.empty(1, 1, msl, msl, dtype=torch.bfloat16, device='cuda')
         }
 
         # Initialize vision CUDA Graph
@@ -661,42 +651,52 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
 
     def record_vision_run(self):
         """Core vision encoder computation for CUDA Graph capture."""
-        conv2d_embed_n256_1152_res(
-            self.buffers['observation_images_normalized'],
-            self.weights['vision_patch_embedding_w'],
-            self.weights['vision_patch_embedding_b'],
-            self.weights['vision_position_embedding'],
-            self.buffers['vision_x'])
+        np_ = self.vit_num_patches
+        vh = self.vit_hidden
+        vi = self.vit_intermediate
+        gs = self.vit_grid_size
+        ps = self.vit_patch_size
 
-        for i in range(27):
-            layer_norm_QKV_matmul_n256_1152_3456_bias(
+        conv2d_embed_res(self.buffers['observation_images_normalized'],
+                         self.weights['vision_patch_embedding_w'],
+                         self.weights['vision_patch_embedding_b'],
+                         self.weights['vision_position_embedding'],
+                         self.buffers['vision_x'], gs, ps, np_, vh)
+
+        for i in range(self.vit_num_layers):
+            layer_norm_QKV_matmul_bias(
                 self.buffers['vision_x'],
                 self.weights['vision_pre_attn_norm_w'][i],
                 self.weights['vision_pre_attn_norm_b'][i],
                 self.weights['vision_attn_qkv_w'][i],
                 self.weights['vision_attn_qkv_b'][i],
-                self.buffers['vision_QKV'], self.buffers['vision_x_norm'])
+                self.buffers['vision_QKV'], self.buffers['vision_x_norm'], np_,
+                vh, self.vit_qkv_hidden)
 
-            attn = AttnMultiKey(self.buffers['vision_QKV'])
+            attn = AttnMultiKey(self.buffers['vision_QKV'], np_,
+                                self.vit_num_heads, self.vit_head_dim, vh)
 
-            matmul_n256_1152_1152_bias_res(
-                attn, self.weights['vision_attn_o_w'][i],
-                self.weights['vision_attn_o_b'][i], self.buffers['vision_x'],
-                self.buffers['vision_x'], self.buffers['vision_x_split_k_buf'])
+            matmul_bias_res(attn, self.weights['vision_attn_o_w'][i],
+                            self.weights['vision_attn_o_b'][i],
+                            self.buffers['vision_x'], self.buffers['vision_x'],
+                            self.buffers['vision_x_split_k_buf'], np_, vh)
 
-            layer_norm_matmul_n256_1152_4304_bias_gelu(
+            layer_norm_matmul_bias_gelu(
                 self.buffers['vision_x'],
                 self.weights['vision_pre_ffn_norm_w'][i],
                 self.weights['vision_pre_ffn_norm_b'][i],
                 self.weights['vision_ffn_up_w'][i],
                 self.weights['vision_ffn_up_b'][i],
-                self.buffers['vision_hidden'], self.buffers['vision_x_norm'])
+                self.buffers['vision_hidden'], self.buffers['vision_x_norm'],
+                np_, vh, vi)
 
-            matmul_n256_4304_1152_bias_res(
-                self.buffers['vision_hidden'],
-                self.weights['vision_ffn_down_w'][i],
-                self.weights['vision_ffn_down_b'][i], self.buffers['vision_x'],
-                self.buffers['vision_x'], self.buffers['vision_x_split_k_buf'])
+            matmul_split_k_bias_res(self.buffers['vision_hidden'],
+                                    self.weights['vision_ffn_down_w'][i],
+                                    self.weights['vision_ffn_down_b'][i],
+                                    self.buffers['vision_x'],
+                                    self.buffers['vision_x'],
+                                    self.buffers['vision_x_split_k_buf'], np_,
+                                    vi, vh)
 
     def record_vision_graph(self):
         """Record vision encoder computation into CUDA Graph."""
@@ -725,11 +725,9 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
     def record_language_run(self):
         """Core language encoder computation for CUDA Graph capture."""
         eps = self.config.text_config.rms_norm_eps
-        head_dim = self.config.text_config.head_dim
-        num_kv_groups = (
-            self.config.text_config.num_attention_heads //
-            self.config.text_config.num_key_value_heads)
-        num_layers = len(self.language_model.model.layers)
+        head_dim = self.lang_head_dim
+        num_kv_groups = self.lang_num_kv_groups
+        num_layers = self.lang_num_layers
         for i in range(num_layers):
             hidden_states = qwen3_decoder_layer(
                 self.buffers['language_x'], self.buffers['language_cos'],
@@ -737,9 +735,7 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
                 self.buffers['position_ids'], head_dim, num_kv_groups, eps,
                 self.weights['language_input_layernorm_w'][i],
                 self.weights['language_post_attn_layernorm_w'][i],
-                self.weights['language_attn_q_w'][i],
-                self.weights['language_attn_k_w'][i],
-                self.weights['language_attn_v_w'][i],
+                self.weights['language_attn_qkv_w'][i],
                 self.weights['language_attn_o_w'][i],
                 self.weights['language_attn_q_norm_w'][i],
                 self.weights['language_attn_k_norm_w'][i],
@@ -748,9 +744,18 @@ class Eagle2_5_VLInferenceForConditionalGeneration(Eagle2_5_VLPreTrainedModel,
                 self.weights['language_down_proj_w'][i],
                 self.config.text_config._attn_implementation)
             self.buffers['language_x'].copy_(hidden_states)
-        self.buffers['language_x'].copy_(
-            qwen3_rmsnorm(self.buffers['language_x'],
-                          self.weights['language_norm_w'], eps))
+        language_x = self.buffers['language_x']
+        head_dim = language_x.shape[-1]
+        rows = language_x.numel() // head_dim
+        language_x_out = torch.empty_like(language_x)
+        qwen3_rmsnorm_kernel[rows, ](
+            language_x,
+            language_x_out,
+            self.weights['language_norm_w'],
+            seq_len=rows,
+            feat_dim=head_dim,
+            eps=eps)
+        self.buffers['language_x'].copy_(language_x_out)
 
     def forward(
         self,

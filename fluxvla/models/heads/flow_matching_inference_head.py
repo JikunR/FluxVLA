@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from fluxvla.engines import HEADS
+from fluxvla.ops.atomic_ops import dit_block_cross, dit_block_self, vl_sa_block
 from fluxvla.ops.triton.position_embedding import \
     fused_position_embedding_add_inplace
 from .flow_matching_head import FlowMatchingHead
@@ -69,53 +70,6 @@ def _action_encode(actions, timesteps, W1_W, W1_b, W2_W, W2_b, W3_W, W3_b,
     x = torch.cat([a_emb, tau_emb], dim=-1)
     x = F.silu(_cat_linear(x, W2_W, W2_b, cat_ids))
     return _cat_linear(x, W3_W, W3_b, cat_ids)
-
-
-def _mha(x, enc, q_w, q_b, k_w, k_b, v_w, v_b, out_w, out_b, num_heads,
-         head_dim):
-    """Multi-head attention. enc=None for self-attention."""
-    B, S, _ = x.shape
-    kv = x if enc is None else enc
-    S_kv = kv.shape[1]
-    q = F.linear(x, q_w, q_b).view(B, S, num_heads, head_dim).transpose(1, 2)
-    k = F.linear(kv, k_w, k_b).view(B, S_kv, num_heads,
-                                    head_dim).transpose(1, 2)
-    v = F.linear(kv, v_w, v_b).view(B, S_kv, num_heads,
-                                    head_dim).transpose(1, 2)
-    out = F.scaled_dot_product_attention(q, k, v)
-    out = out.transpose(1, 2).reshape(B, S, -1).contiguous()
-    return F.linear(out, out_w, out_b)
-
-
-def _ff_gelu(x, up_w, up_b, down_w, down_b):
-    """FeedForward with GELU-approximate activation."""
-    return F.linear(
-        F.gelu(F.linear(x, up_w, up_b), approximate='tanh'), down_w, down_b)
-
-
-def _vl_sa_block(x, n1_w, n1_b, q_w, q_b, k_w, k_b, v_w, v_b, o_w, o_b, n3_w,
-                 n3_b, ff_up_w, ff_up_b, ff_dn_w, ff_dn_b, nh, hd):
-    """VL self-attention transformer block (LayerNorm, no AdaLayerNorm)."""
-    dim = x.shape[-1]
-    h = F.layer_norm(x, [dim], n1_w, n1_b)
-    x = _mha(h, None, q_w, q_b, k_w, k_b, v_w, v_b, o_w, o_b, nh, hd) + x
-    h = F.layer_norm(x, [dim], n3_w, n3_b)
-    x = _ff_gelu(h, ff_up_w, ff_up_b, ff_dn_w, ff_dn_b) + x
-    return x
-
-
-def _dit_block(x, enc, temb, n1_w, n1_b, q_w, q_b, k_w, k_b, v_w, v_b, o_w,
-               o_b, ff_up_w, ff_up_b, ff_dn_w, ff_dn_b, nh, hd, dim,
-               is_self_attn):
-    """DiT transformer block with AdaLayerNorm."""
-    ada = F.linear(F.silu(temb), n1_w, n1_b)
-    scale, shift = ada.chunk(2, dim=1)
-    h = F.layer_norm(x, [dim]) * (1 + scale[:, None]) + shift[:, None]
-    kv = None if is_self_attn else enc
-    x = _mha(h, kv, q_w, q_b, k_w, k_b, v_w, v_b, o_w, o_b, nh, hd) + x
-    h = F.layer_norm(x, [dim])
-    x = _ff_gelu(h, ff_up_w, ff_up_b, ff_dn_w, ff_dn_b) + x
-    return x
 
 
 @HEADS.register_module()
@@ -180,6 +134,7 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
                      output_dim=1024,
                      positional_embeddings=None),
                  ori_action_dim=None,
+                 max_input_seq_len: int = 600,
                  *args,
                  **kwargs):
         super().__init__(hidden_size, state_dim, input_embedding_dim,
@@ -190,141 +145,196 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
                          max_seq_len, num_timestep_buckets, noise_s,
                          noise_beta_alpha, noise_beta_beta, num_steps,
                          diffusion_model_cfg, ori_action_dim, *args, **kwargs)
+
+        # ---- Derived hyperparameters ----
+        E = max_num_embodiments
+        sd = state_dim
+        hs = hidden_size
+        ied = input_embedding_dim
+        ad = action_dim
+        bed = backbone_embedding_dim
+        nvt = num_target_vision_tokens
+        msl = max_seq_len
+        temb_ch = 256  # timestep embedding channels (sinusoidal)
+
+        # VL self-attention
+        vl_nh = vl_self_attention_cfg['num_attention_heads']
+        vl_hd = vl_self_attention_cfg['attention_head_dim']
+        vl_nl = vl_self_attention_cfg['num_layers']
+        vl_dim = vl_nh * vl_hd
+        vl_ff = vl_dim * 4
+
+        # DiT
+        dit_nh = diffusion_model_cfg['num_attention_heads']
+        dit_hd = diffusion_model_cfg['attention_head_dim']
+        dit_nl = diffusion_model_cfg['num_layers']
+        dit_cad = diffusion_model_cfg['cross_attention_dim']
+        dit_od = diffusion_model_cfg['output_dim']
+        dit_dim = dit_nh * dit_hd
+        dit_ff = dit_dim * 4
+        dit_ns = dit_nl // 2  # self-attn block count (odd layers)
+
+        # Store for record_run
+        self.vl_nh = vl_nh
+        self.vl_hd = vl_hd
+        self.vl_nl = vl_nl
+        self.vl_dim = vl_dim
+        self.vl_ff = vl_ff
+        self.dit_nh = dit_nh
+        self.dit_hd = dit_hd
+        self.dit_nl = dit_nl
+        self.dit_dim = dit_dim
+        self.dit_ff = dit_ff
+        self.max_input_seq_len = max_input_seq_len
+        self.backbone_embedding_dim = bed
+        self.state_dim = sd
+
         self.weights = {
-            # State encoder (embodiment-conditioned, 32 embodiments)
+            # State encoder (embodiment-conditioned)
             'state_encoder_layer1_W':
-            torch.empty(32, 64, 1024, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, sd, hs, dtype=torch.bfloat16, device='cuda'),
             'state_encoder_layer1_b':
-            torch.empty(32, 1024, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, hs, dtype=torch.bfloat16, device='cuda'),
             'state_encoder_layer2_W':
-            torch.empty(32, 1024, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, hs, ied, dtype=torch.bfloat16, device='cuda'),
             'state_encoder_layer2_b':
-            torch.empty(32, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ied, dtype=torch.bfloat16, device='cuda'),
             # Action encoder (embodiment-conditioned)
             'action_encoder_W1_W':
-            torch.empty(32, 32, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ad, ied, dtype=torch.bfloat16, device='cuda'),
             'action_encoder_W1_b':
-            torch.empty(32, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ied, dtype=torch.bfloat16, device='cuda'),
             'action_encoder_W2_W':
-            torch.empty(32, 3072, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, 2 * ied, ied, dtype=torch.bfloat16, device='cuda'),
             'action_encoder_W2_b':
-            torch.empty(32, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ied, dtype=torch.bfloat16, device='cuda'),
             'action_encoder_W3_W':
-            torch.empty(32, 1536, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ied, ied, dtype=torch.bfloat16, device='cuda'),
             'action_encoder_W3_b':
-            torch.empty(32, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ied, dtype=torch.bfloat16, device='cuda'),
             # Action decoder (embodiment-conditioned)
             'action_decoder_layer1_W':
-            torch.empty(32, 1024, 1024, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, hs, hs, dtype=torch.bfloat16, device='cuda'),
             'action_decoder_layer1_b':
-            torch.empty(32, 1024, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, hs, dtype=torch.bfloat16, device='cuda'),
             'action_decoder_layer2_W':
-            torch.empty(32, 1024, 32, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, hs, ad, dtype=torch.bfloat16, device='cuda'),
             'action_decoder_layer2_b':
-            torch.empty(32, 32, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(E, ad, dtype=torch.bfloat16, device='cuda'),
             # DiT timestep encoder
             'dit_timestep_linear1_w':
-            torch.empty(1536, 256, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_dim, temb_ch, dtype=torch.bfloat16, device='cuda'),
             'dit_timestep_linear1_b':
-            torch.empty(1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_timestep_linear2_w':
-            torch.empty(1536, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_dim, dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_timestep_linear2_b':
-            torch.empty(1536, dtype=torch.bfloat16, device='cuda'),
-            # DiT transformer blocks (16 blocks, stacked)
+            torch.empty(dit_dim, dtype=torch.bfloat16, device='cuda'),
+            # DiT transformer blocks (stacked)
             'dit_norm1_linear_w':
-            torch.empty(16, 3072, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                dit_nl,
+                2 * dit_dim,
+                dit_dim,
+                dtype=torch.bfloat16,
+                device='cuda'),
             'dit_norm1_linear_b':
-            torch.empty(16, 3072, dtype=torch.bfloat16, device='cuda'),
-            'dit_attn_q_w':
-            torch.empty(16, 1536, 1536, dtype=torch.bfloat16, device='cuda'),
-            'dit_attn_q_b':
-            torch.empty(16, 1536, dtype=torch.bfloat16, device='cuda'),
-            # Cross-attention blocks (even: 0,2,4,6,8,10,12,14) - k/v dim 2048
-            'dit_cross_attn_k_w':
-            torch.empty(8, 1536, 2048, dtype=torch.bfloat16, device='cuda'),
-            'dit_cross_attn_k_b':
-            torch.empty(8, 1536, dtype=torch.bfloat16, device='cuda'),
-            'dit_cross_attn_v_w':
-            torch.empty(8, 1536, 2048, dtype=torch.bfloat16, device='cuda'),
-            'dit_cross_attn_v_b':
-            torch.empty(8, 1536, dtype=torch.bfloat16, device='cuda'),
-            # Self-attention blocks (odd: 1,3,5,7,9,11,13,15) - k/v dim 1536
-            'dit_self_attn_k_w':
-            torch.empty(8, 1536, 1536, dtype=torch.bfloat16, device='cuda'),
-            'dit_self_attn_k_b':
-            torch.empty(8, 1536, dtype=torch.bfloat16, device='cuda'),
-            'dit_self_attn_v_w':
-            torch.empty(8, 1536, 1536, dtype=torch.bfloat16, device='cuda'),
-            'dit_self_attn_v_b':
-            torch.empty(8, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                dit_nl, 2 * dit_dim, dtype=torch.bfloat16, device='cuda'),
+            # Self-attention blocks (odd) - merged QKV
+            'dit_self_qkv_w':
+            torch.empty(
+                dit_ns,
+                3 * dit_dim,
+                dit_dim,
+                dtype=torch.bfloat16,
+                device='cuda'),
+            'dit_self_qkv_b':
+            torch.empty(
+                dit_ns, 3 * dit_dim, dtype=torch.bfloat16, device='cuda'),
+            # Cross-attention blocks (even) - Q separate, KV merged
+            'dit_cross_q_w':
+            torch.empty(
+                dit_ns, dit_dim, dit_dim, dtype=torch.bfloat16, device='cuda'),
+            'dit_cross_q_b':
+            torch.empty(dit_ns, dit_dim, dtype=torch.bfloat16, device='cuda'),
+            'dit_cross_kv_w':
+            torch.empty(
+                dit_ns,
+                2 * dit_dim,
+                dit_cad,
+                dtype=torch.bfloat16,
+                device='cuda'),
+            'dit_cross_kv_b':
+            torch.empty(
+                dit_ns, 2 * dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_attn_out_w':
-            torch.empty(16, 1536, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                dit_nl, dit_dim, dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_attn_out_b':
-            torch.empty(16, 1536, dtype=torch.bfloat16, device='cuda'),
-            'dit_ff_up_w':
-            torch.empty(16, 6144, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_nl, dit_dim, dtype=torch.bfloat16, device='cuda'),
+            'dit_ff_up_w_T':
+            torch.empty(
+                dit_nl, dit_dim, dit_ff, dtype=torch.bfloat16, device='cuda'),
             'dit_ff_up_b':
-            torch.empty(16, 6144, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_nl, dit_ff, dtype=torch.bfloat16, device='cuda'),
             'dit_ff_down_w':
-            torch.empty(16, 1536, 6144, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                dit_nl, dit_dim, dit_ff, dtype=torch.bfloat16, device='cuda'),
             'dit_ff_down_b':
-            torch.empty(16, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_nl, dit_dim, dtype=torch.bfloat16, device='cuda'),
             # DiT output projection
             'dit_proj_out_1_w':
-            torch.empty(3072, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                2 * dit_dim, dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_proj_out_1_b':
-            torch.empty(3072, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(2 * dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_proj_out_2_w':
-            torch.empty(1024, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_od, dit_dim, dtype=torch.bfloat16, device='cuda'),
             'dit_proj_out_2_b':
-            torch.empty(1024, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(dit_od, dtype=torch.bfloat16, device='cuda'),
             # Future tokens
             'future_tokens_w':
-            torch.empty(32, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(nvt, ied, dtype=torch.bfloat16, device='cuda'),
             # VLLN (LayerNorm)
             'vlln_w':
-            torch.empty(2048, dtype=torch.float32, device='cuda'),
+            torch.empty(bed, dtype=torch.float32, device='cuda'),
             'vlln_b':
-            torch.empty(2048, dtype=torch.float32, device='cuda'),
-            # VL self-attention (4 blocks, stacked)
+            torch.empty(bed, dtype=torch.float32, device='cuda'),
+            # VL self-attention (stacked)
             'vl_sa_norm1_w':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_dim, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_norm1_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_attn_q_w':
-            torch.empty(4, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_attn_q_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_attn_k_w':
-            torch.empty(4, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_attn_k_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_attn_v_w':
-            torch.empty(4, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_attn_v_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_dim, dtype=torch.bfloat16, device='cuda'),
+            'vl_sa_qkv_w':
+            torch.empty(
+                vl_nl, 3 * vl_dim, vl_dim, dtype=torch.bfloat16,
+                device='cuda'),
+            'vl_sa_qkv_b':
+            torch.empty(
+                vl_nl, 3 * vl_dim, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_attn_out_w':
-            torch.empty(4, 2048, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                vl_nl, vl_dim, vl_dim, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_attn_out_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_dim, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_norm3_w':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_dim, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_norm3_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
-            'vl_sa_ff_up_w':
-            torch.empty(4, 8192, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_dim, dtype=torch.bfloat16, device='cuda'),
+            'vl_sa_ff_up_w_T':
+            torch.empty(
+                vl_nl, vl_dim, vl_ff, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_ff_up_b':
-            torch.empty(4, 8192, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_ff, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_ff_down_w':
-            torch.empty(4, 2048, 8192, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                vl_nl, vl_dim, vl_ff, dtype=torch.bfloat16, device='cuda'),
             'vl_sa_ff_down_b':
-            torch.empty(4, 2048, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(vl_nl, vl_dim, dtype=torch.bfloat16, device='cuda'),
             # Position embedding
             'position_embedding_w':
-            torch.empty(1024, 1536, dtype=torch.bfloat16, device='cuda'),
-            'input_features':
-            torch.empty(1, 1024, 2048, dtype=torch.bfloat16, device='cuda')
+            torch.empty(msl, ied, dtype=torch.bfloat16, device='cuda'),
         }
 
         self.loaded_weights = False
@@ -372,46 +382,60 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
             self.model.timestep_encoder.timestep_embedder.linear_2.bias)
         # DiT transformer blocks (16 blocks)
         blocks = self.model.transformer_blocks
+        nl = self.dit_nl
         self.weights['dit_norm1_linear_w'].copy_(
-            torch.stack([blocks[i].norm1.linear.weight for i in range(16)]))
+            torch.stack([blocks[i].norm1.linear.weight for i in range(nl)]))
         self.weights['dit_norm1_linear_b'].copy_(
-            torch.stack([blocks[i].norm1.linear.bias for i in range(16)]))
-        self.weights['dit_attn_q_w'].copy_(
-            torch.stack([blocks[i].attn1.to_q.weight for i in range(16)]))
-        self.weights['dit_attn_q_b'].copy_(
-            torch.stack([blocks[i].attn1.to_q.bias for i in range(16)]))
-        # Cross-attention k/v (even blocks: 0,2,4,6,8,10,12,14)
-        cross_indices = list(range(0, 16, 2))
-        self.weights['dit_cross_attn_k_w'].copy_(
-            torch.stack([blocks[i].attn1.to_k.weight for i in cross_indices]))
-        self.weights['dit_cross_attn_k_b'].copy_(
-            torch.stack([blocks[i].attn1.to_k.bias for i in cross_indices]))
-        self.weights['dit_cross_attn_v_w'].copy_(
-            torch.stack([blocks[i].attn1.to_v.weight for i in cross_indices]))
-        self.weights['dit_cross_attn_v_b'].copy_(
-            torch.stack([blocks[i].attn1.to_v.bias for i in cross_indices]))
-        # Self-attention k/v (odd blocks: 1,3,5,7,9,11,13,15)
-        self_indices = list(range(1, 16, 2))
-        self.weights['dit_self_attn_k_w'].copy_(
-            torch.stack([blocks[i].attn1.to_k.weight for i in self_indices]))
-        self.weights['dit_self_attn_k_b'].copy_(
-            torch.stack([blocks[i].attn1.to_k.bias for i in self_indices]))
-        self.weights['dit_self_attn_v_w'].copy_(
-            torch.stack([blocks[i].attn1.to_v.weight for i in self_indices]))
-        self.weights['dit_self_attn_v_b'].copy_(
-            torch.stack([blocks[i].attn1.to_v.bias for i in self_indices]))
+            torch.stack([blocks[i].norm1.linear.bias for i in range(nl)]))
+        # Self-attention merged QKV (odd blocks)
+        self_indices = list(range(1, nl, 2))
+        self.weights['dit_self_qkv_w'].copy_(
+            torch.stack([
+                torch.cat([
+                    blocks[i].attn1.to_q.weight, blocks[i].attn1.to_k.weight,
+                    blocks[i].attn1.to_v.weight
+                ],
+                          dim=0) for i in self_indices
+            ]))
+        self.weights['dit_self_qkv_b'].copy_(
+            torch.stack([
+                torch.cat([
+                    blocks[i].attn1.to_q.bias, blocks[i].attn1.to_k.bias,
+                    blocks[i].attn1.to_v.bias
+                ],
+                          dim=0) for i in self_indices
+            ]))
+        # Cross-attention Q + merged KV (even blocks)
+        cross_indices = list(range(0, nl, 2))
+        self.weights['dit_cross_q_w'].copy_(
+            torch.stack([blocks[i].attn1.to_q.weight for i in cross_indices]))
+        self.weights['dit_cross_q_b'].copy_(
+            torch.stack([blocks[i].attn1.to_q.bias for i in cross_indices]))
+        self.weights['dit_cross_kv_w'].copy_(
+            torch.stack([
+                torch.cat(
+                    [blocks[i].attn1.to_k.weight, blocks[i].attn1.to_v.weight],
+                    dim=0) for i in cross_indices
+            ]))
+        self.weights['dit_cross_kv_b'].copy_(
+            torch.stack([
+                torch.cat(
+                    [blocks[i].attn1.to_k.bias, blocks[i].attn1.to_v.bias],
+                    dim=0) for i in cross_indices
+            ]))
         self.weights['dit_attn_out_w'].copy_(
-            torch.stack([blocks[i].attn1.to_out[0].weight for i in range(16)]))
+            torch.stack([blocks[i].attn1.to_out[0].weight for i in range(nl)]))
         self.weights['dit_attn_out_b'].copy_(
-            torch.stack([blocks[i].attn1.to_out[0].bias for i in range(16)]))
-        self.weights['dit_ff_up_w'].copy_(
-            torch.stack([blocks[i].ff.net[0].proj.weight for i in range(16)]))
+            torch.stack([blocks[i].attn1.to_out[0].bias for i in range(nl)]))
+        self.weights['dit_ff_up_w_T'].copy_(
+            torch.stack([blocks[i].ff.net[0].proj.weight
+                         for i in range(nl)]).permute(0, 2, 1))
         self.weights['dit_ff_up_b'].copy_(
-            torch.stack([blocks[i].ff.net[0].proj.bias for i in range(16)]))
+            torch.stack([blocks[i].ff.net[0].proj.bias for i in range(nl)]))
         self.weights['dit_ff_down_w'].copy_(
-            torch.stack([blocks[i].ff.net[2].weight for i in range(16)]))
+            torch.stack([blocks[i].ff.net[2].weight for i in range(nl)]))
         self.weights['dit_ff_down_b'].copy_(
-            torch.stack([blocks[i].ff.net[2].bias for i in range(16)]))
+            torch.stack([blocks[i].ff.net[2].bias for i in range(nl)]))
         # DiT output projection
         self.weights['dit_proj_out_1_w'].copy_(self.model.proj_out_1.weight)
         self.weights['dit_proj_out_1_b'].copy_(self.model.proj_out_1.bias)
@@ -422,55 +446,73 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
         # VLLN (LayerNorm)
         self.weights['vlln_w'].copy_(self.vlln.weight)
         self.weights['vlln_b'].copy_(self.vlln.bias)
-        # VL self-attention (4 blocks)
+        # VL self-attention blocks
         vl_blocks = self.vl_self_attention.transformer_blocks
+        vl_n = self.vl_nl
         self.weights['vl_sa_norm1_w'].copy_(
-            torch.stack([vl_blocks[i].norm1.weight for i in range(4)]))
+            torch.stack([vl_blocks[i].norm1.weight for i in range(vl_n)]))
         self.weights['vl_sa_norm1_b'].copy_(
-            torch.stack([vl_blocks[i].norm1.bias for i in range(4)]))
-        self.weights['vl_sa_attn_q_w'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_q.weight for i in range(4)]))
-        self.weights['vl_sa_attn_q_b'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_q.bias for i in range(4)]))
-        self.weights['vl_sa_attn_k_w'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_k.weight for i in range(4)]))
-        self.weights['vl_sa_attn_k_b'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_k.bias for i in range(4)]))
-        self.weights['vl_sa_attn_v_w'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_v.weight for i in range(4)]))
-        self.weights['vl_sa_attn_v_b'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_v.bias for i in range(4)]))
+            torch.stack([vl_blocks[i].norm1.bias for i in range(vl_n)]))
+        self.weights['vl_sa_qkv_w'].copy_(
+            torch.stack([
+                torch.cat([
+                    vl_blocks[i].attn1.to_q.weight,
+                    vl_blocks[i].attn1.to_k.weight,
+                    vl_blocks[i].attn1.to_v.weight
+                ],
+                          dim=0) for i in range(vl_n)
+            ]))
+        self.weights['vl_sa_qkv_b'].copy_(
+            torch.stack([
+                torch.cat([
+                    vl_blocks[i].attn1.to_q.bias, vl_blocks[i].attn1.to_k.bias,
+                    vl_blocks[i].attn1.to_v.bias
+                ],
+                          dim=0) for i in range(vl_n)
+            ]))
         self.weights['vl_sa_attn_out_w'].copy_(
             torch.stack(
-                [vl_blocks[i].attn1.to_out[0].weight for i in range(4)]))
+                [vl_blocks[i].attn1.to_out[0].weight for i in range(vl_n)]))
         self.weights['vl_sa_attn_out_b'].copy_(
-            torch.stack([vl_blocks[i].attn1.to_out[0].bias for i in range(4)]))
+            torch.stack(
+                [vl_blocks[i].attn1.to_out[0].bias for i in range(vl_n)]))
         self.weights['vl_sa_norm3_w'].copy_(
-            torch.stack([vl_blocks[i].norm3.weight for i in range(4)]))
+            torch.stack([vl_blocks[i].norm3.weight for i in range(vl_n)]))
         self.weights['vl_sa_norm3_b'].copy_(
-            torch.stack([vl_blocks[i].norm3.bias for i in range(4)]))
-        self.weights['vl_sa_ff_up_w'].copy_(
-            torch.stack([vl_blocks[i].ff.net[0].proj.weight
-                         for i in range(4)]))
+            torch.stack([vl_blocks[i].norm3.bias for i in range(vl_n)]))
+        self.weights['vl_sa_ff_up_w_T'].copy_(
+            torch.stack([
+                vl_blocks[i].ff.net[0].proj.weight for i in range(vl_n)
+            ]).permute(0, 2, 1))
         self.weights['vl_sa_ff_up_b'].copy_(
-            torch.stack([vl_blocks[i].ff.net[0].proj.bias for i in range(4)]))
+            torch.stack(
+                [vl_blocks[i].ff.net[0].proj.bias for i in range(vl_n)]))
         self.weights['vl_sa_ff_down_w'].copy_(
-            torch.stack([vl_blocks[i].ff.net[2].weight for i in range(4)]))
+            torch.stack([vl_blocks[i].ff.net[2].weight for i in range(vl_n)]))
         self.weights['vl_sa_ff_down_b'].copy_(
-            torch.stack([vl_blocks[i].ff.net[2].bias for i in range(4)]))
+            torch.stack([vl_blocks[i].ff.net[2].bias for i in range(vl_n)]))
         # Position embedding
         self.weights['position_embedding_w'].copy_(
             self.position_embedding.weight)
 
-        max_seq_len = 600
         self.buffers = {
             'input_features':
             torch.empty(
-                1, max_seq_len, 2048, dtype=torch.bfloat16, device='cuda'),
+                1,
+                self.max_input_seq_len,
+                self.backbone_embedding_dim,
+                dtype=torch.bfloat16,
+                device='cuda'),
             'states':
-            torch.empty(1, 64, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                1, self.state_dim, dtype=torch.bfloat16, device='cuda'),
             'state_features':
-            torch.empty(1, 1, 1536, dtype=torch.bfloat16, device='cuda'),
+            torch.empty(
+                1,
+                1,
+                self.input_embedding_dim,
+                dtype=torch.bfloat16,
+                device='cuda'),
             'actions':
             torch.empty(
                 1,
@@ -505,25 +547,26 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
                                       self.weights['vlln_w'],
                                       self.weights['vlln_b'])
 
-        # VL self-attention (4 blocks, num_heads=32, head_dim=64)
-        for i in range(4):
-            input_features = _vl_sa_block(
-                input_features, self.weights['vl_sa_norm1_w'][i],
+        # VL self-attention blocks
+        for i in range(self.vl_nl):
+            input_features = vl_sa_block(
+                input_features,
+                self.weights['vl_sa_norm1_w'][i],
                 self.weights['vl_sa_norm1_b'][i],
-                self.weights['vl_sa_attn_q_w'][i],
-                self.weights['vl_sa_attn_q_b'][i],
-                self.weights['vl_sa_attn_k_w'][i],
-                self.weights['vl_sa_attn_k_b'][i],
-                self.weights['vl_sa_attn_v_w'][i],
-                self.weights['vl_sa_attn_v_b'][i],
+                self.weights['vl_sa_qkv_w'][i],
+                self.weights['vl_sa_qkv_b'][i],
                 self.weights['vl_sa_attn_out_w'][i],
                 self.weights['vl_sa_attn_out_b'][i],
                 self.weights['vl_sa_norm3_w'][i],
                 self.weights['vl_sa_norm3_b'][i],
-                self.weights['vl_sa_ff_up_w'][i],
+                self.weights['vl_sa_ff_up_w_T'][i],
                 self.weights['vl_sa_ff_up_b'][i],
                 self.weights['vl_sa_ff_down_w'][i],
-                self.weights['vl_sa_ff_down_b'][i], 32, 64)
+                self.weights['vl_sa_ff_down_b'][i],
+                self.vl_nh,
+                self.vl_hd,
+                ff_features=self.vl_dim,
+                ff_hidden=self.vl_ff)
         self.buffers['input_features'].copy_(input_features)
 
         # # State encoder
@@ -535,7 +578,7 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
                      self.weights['state_encoder_layer2_b'], embodiment_ids))
 
         dt = 1.0 / self.num_inference_timesteps
-        inner_dim = 1536
+        inner_dim = self.dit_dim
         actions = self.buffers['actions']
         device = actions.device
 
@@ -576,36 +619,53 @@ class FlowMatchingInferenceHead(FlowMatchingHead):
             temb = F.linear(temb, self.weights['dit_timestep_linear2_w'],
                             self.weights['dit_timestep_linear2_b'])
 
-            # DiT transformer blocks (16 blocks, num_heads=32, head_dim=48)
+            # DiT transformer blocks
             hidden_states = sa_embs
             cross_idx, self_idx = 0, 0
-            for i in range(16):
-                is_self_attn = (i % 2 == 1)
-                if is_self_attn:
-                    k_w = self.weights['dit_self_attn_k_w'][self_idx]
-                    k_b = self.weights['dit_self_attn_k_b'][self_idx]
-                    v_w = self.weights['dit_self_attn_v_w'][self_idx]
-                    v_b = self.weights['dit_self_attn_v_b'][self_idx]
+            for i in range(self.dit_nl):
+                if i % 2 == 1:
+                    hidden_states = dit_block_self(
+                        hidden_states,
+                        temb,
+                        self.weights['dit_norm1_linear_w'][i],
+                        self.weights['dit_norm1_linear_b'][i],
+                        self.weights['dit_self_qkv_w'][self_idx],
+                        self.weights['dit_self_qkv_b'][self_idx],
+                        self.weights['dit_attn_out_w'][i],
+                        self.weights['dit_attn_out_b'][i],
+                        self.weights['dit_ff_up_w_T'][i],
+                        self.weights['dit_ff_up_b'][i],
+                        self.weights['dit_ff_down_w'][i],
+                        self.weights['dit_ff_down_b'][i],
+                        self.dit_nh,
+                        self.dit_hd,
+                        inner_dim,
+                        ff_features=inner_dim,
+                        ff_hidden=self.dit_ff)
                     self_idx += 1
                 else:
-                    k_w = self.weights['dit_cross_attn_k_w'][cross_idx]
-                    k_b = self.weights['dit_cross_attn_k_b'][cross_idx]
-                    v_w = self.weights['dit_cross_attn_v_w'][cross_idx]
-                    v_b = self.weights['dit_cross_attn_v_b'][cross_idx]
+                    hidden_states = dit_block_cross(
+                        hidden_states,
+                        input_features,
+                        temb,
+                        self.weights['dit_norm1_linear_w'][i],
+                        self.weights['dit_norm1_linear_b'][i],
+                        self.weights['dit_cross_q_w'][cross_idx],
+                        self.weights['dit_cross_q_b'][cross_idx],
+                        self.weights['dit_cross_kv_w'][cross_idx],
+                        self.weights['dit_cross_kv_b'][cross_idx],
+                        self.weights['dit_attn_out_w'][i],
+                        self.weights['dit_attn_out_b'][i],
+                        self.weights['dit_ff_up_w_T'][i],
+                        self.weights['dit_ff_up_b'][i],
+                        self.weights['dit_ff_down_w'][i],
+                        self.weights['dit_ff_down_b'][i],
+                        self.dit_nh,
+                        self.dit_hd,
+                        inner_dim,
+                        ff_features=inner_dim,
+                        ff_hidden=self.dit_ff)
                     cross_idx += 1
-                hidden_states = _dit_block(
-                    hidden_states, input_features, temb,
-                    self.weights['dit_norm1_linear_w'][i],
-                    self.weights['dit_norm1_linear_b'][i],
-                    self.weights['dit_attn_q_w'][i],
-                    self.weights['dit_attn_q_b'][i], k_w, k_b, v_w, v_b,
-                    self.weights['dit_attn_out_w'][i],
-                    self.weights['dit_attn_out_b'][i],
-                    self.weights['dit_ff_up_w'][i],
-                    self.weights['dit_ff_up_b'][i],
-                    self.weights['dit_ff_down_w'][i],
-                    self.weights['dit_ff_down_b'][i], 32, 48, inner_dim,
-                    is_self_attn)
 
             # DiT output
             shift, scale = F.linear(
