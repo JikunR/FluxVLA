@@ -11,7 +11,7 @@ class ConditionGemmaInferenceModel(ConditionGemmaModel):
     Extends :class:`ConditionGemmaModel` with :meth:`prepare_triton`,
     which extracts, fuses and reformats model weights for the
     Triton-based CUDA-graph inference pipeline
-    (:class:`PI05Inference`).
+    (:class:`PI05FlowMatchingInference`).
 
     Weight pre-processing performed by :meth:`prepare_triton`:
 
@@ -29,7 +29,7 @@ class ConditionGemmaInferenceModel(ConditionGemmaModel):
 
     All returned tensors are bf16, column-major (transposed),
     contiguous, and on CUDA — ready to be consumed by
-    :meth:`PI05Inference.from_weights`.
+    :meth:`PI05FlowMatchingInference.prepare_triton_inference`.
 
     Args:
         Inherits all arguments from :class:`ConditionGemmaModel`.

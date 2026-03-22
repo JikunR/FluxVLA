@@ -250,6 +250,7 @@ huggingface-cli download yinchimaoliang/pi05_paligemma_libero_10_full_finetune_b
 - Support both FSDP and DDP, support lora training mode.
 - Support Parquet datasets and enable the loading of data in the LeRobot format.
 - Support resuming training from checkpoints.
+- Support accelerated inference for Gr00t and PI0.5; on A100 hardware, Gr00t achieves around 5x speedup and PI0.5 achieves around 15x speedup.
 
 ## Usage
 
@@ -263,7 +264,6 @@ For example:
 
 ```
 export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
 /root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune --cfg-options train_dataloader.per_device_batch_size=2
 ```
 
@@ -277,7 +277,6 @@ For example:
 
 ```
 export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
 /root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/eval.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --ckpt-path work_dirs/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.pt
 ```
 
@@ -285,7 +284,6 @@ export HF_ENDPOINT="https://hf-mirror.com"
 
 ```
 export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
 bash scripts/train.sh [CONFIG] [WORK_DIR] --cfg-options train_dataloader.per_device_batch_size=[PER_DEVICE_BATCH_SIZE] train_dataloader.batch_size=[GLOBAL_BATCH_SIZE] runner.max_steps=[MAX_STEPS] runner.save_interval=[SAVE_INTERVAL] --eval-after-train
 ```
 
@@ -297,7 +295,6 @@ To resume training from a checkpoint, use the `--resume-from` parameter to speci
 
 ```
 export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
 /root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune \
@@ -309,7 +306,6 @@ export HF_ENDPOINT="https://hf-mirror.com"
 
 ```
 export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
 bash scripts/train.sh [CONFIG] [WORK_DIR] \
   --resume-from [CHECKPOINT_PATH] \
   --cfg-options train_dataloader.per_device_batch_size=[PER_DEVICE_BATCH_SIZE] runner.max_steps=[MAX_STEPS]
@@ -319,7 +315,6 @@ bash scripts/train.sh [CONFIG] [WORK_DIR] \
 
 ```
 export WANDB_MODE=disabled
-export HF_ENDPOINT="https://hf-mirror.com"
 bash scripts/eval.sh [CONFIG] [CKPT_PATH] --cfg-options [CFG_OPTIONS]
 ```
 
@@ -329,6 +324,16 @@ To run inference on the real robot, first install the environment on the robot, 
 
 ```
 python scripts/inference_real_robot.py --config [CONFIG] -- ckpt-path [CKPT_PATH]
+```
+
+## FAQ
+
+**Q: I'm having trouble connecting to Hugging Face when downloading models or datasets.**
+
+A: If you experience connectivity issues with Hugging Face (e.g., slow downloads, timeouts, or connection refused), you can try using the [hf-mirror](https://hf-mirror.com) endpoint by setting the following environment variable before running your commands:
+
+```bash
+export HF_ENDPOINT="https://hf-mirror.com"
 ```
 
 ## Support
@@ -344,4 +349,3 @@ If you encounter any issues while using this repository, don't hesitate to reach
 - The RLDS dataset will be deprecated and replaced by a Parquet dataset.
 - The logger functionality will be fully implemented.
 - issacsim will be supported.
-- Inference acceleration will be supported (torch.compile, Triton and CUDA ops).

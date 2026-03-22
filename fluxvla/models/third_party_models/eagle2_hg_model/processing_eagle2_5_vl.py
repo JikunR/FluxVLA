@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Origin: Source
+# Upstream-URL: https://github.com/NVIDIA/Isaac-GR00T/blob/n1.5-release/gr00t/model/backbone/eagle2_hg_model/processing_eagle2_5_vl.py
+# Upstream-Ref: n1.5-release
+# SPDX-License-Identifier: Apache-2.0
+# Notes: Attribution normalized; no functional change.
 """
 Processor class for Eagle2_5_VL.
 copy from https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava_onevision/processing_llava_onevision.py
