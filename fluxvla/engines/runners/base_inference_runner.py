@@ -14,6 +14,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 import cv2
@@ -30,12 +31,16 @@ overwatch = initialize_overwatch(__name__)
 class BaseInferenceRunner:
     """Base class for robot inference runners.
 
-    This base class provides common functionality for different robot inference
-    runners, including model setup, observation handling, task management,
-    and inference loops.
+    Provides model setup, observation handling, task management, and a
+    template inference loop with four overridable phases:
+
+        _preprocess  → observe + build model inputs
+        _predict_action  → model inference (normalized actions)
+        _postprocess_actions → denormalize to robot command space
+        _execute_actions → send commands to the robot (abstract)
 
     Subclasses should implement robot-specific methods like get_ros_observation
-    and _execute_actions.
+    and _execute_actions. Override other phases as needed.
     """
 
     def __init__(self,
@@ -151,6 +156,12 @@ class BaseInferenceRunner:
         self.mixed_precision_dtype = str_to_dtype(mixed_precision_dtype)
         self.enable_mixed_precision = enable_mixed_precision
 
+        # Action context: SimpleNamespace shared between _predict_action,
+        # _postprocess_actions, and _execute_actions within one iteration.
+        # Becomes _prev_ctx in the next iteration for cross-chunk continuity.
+        self._prev_ctx = None
+        self._action_ctx = SimpleNamespace()
+
     def _apply_jpeg_compression(self, img: np.ndarray) -> np.ndarray:
         """Apply JPEG compression and decompression to image.
 
@@ -241,7 +252,9 @@ class BaseInferenceRunner:
                 self._run_episode(initial_instruction)
 
     def _run_episode(self, default_instruction: str):
-        """Run a single episode of robot control.
+        """Run a single episode: preprocess → predict → postprocess → execute.
+
+        Subclasses should override individual phases rather than this method.
 
         Args:
             default_instruction (str): Default task instruction to use
@@ -250,38 +263,68 @@ class BaseInferenceRunner:
 
         t = 0
         rate = rospy.Rate(self.publish_rate)
-        rate.sleep()
 
-        max_publish_step = self.max_publish_step
-        actions = np.zeros([self.action_chunk, self.state_dim])
-
-        while t < max_publish_step and not rospy.is_shutdown():
+        while t < self.max_publish_step and not rospy.is_shutdown():
             instructions = self._get_user_task_instruction(default_instruction)
+            self._prev_ctx = None
             for instruction in instructions:
-                # Update observation and predict actions
-                for _ in range(1):  # Single observation update
-                    obs = self.update_observation_window()
-
-                obs['task_description'] = instruction
-                inputs = self.dataset(obs)
+                self._action_ctx = SimpleNamespace()
+                self._action_ctx.instruction = instruction
+                inputs = self._preprocess(instruction)
 
                 with torch.autocast(
                         'cuda',
                         dtype=self.mixed_precision_dtype,
                         enabled=self.enable_mixed_precision):
-                    actions = self.vla.predict_action(**inputs)
-                raw_action = actions
+                    raw_action = self._predict_action(inputs)
 
-                # Denormalize actions to robot command space
-                denormalized_actions = self.denormalize_action(
-                    dict(action=raw_action.cpu().numpy()))
+                actions = self._postprocess_actions(raw_action)
+                self._execute_actions(actions, rate)
 
-                # Execute action sequence
-                self._execute_actions(denormalized_actions[:self.action_chunk],
-                                      rate)
-
+                self._prev_ctx = self._action_ctx
                 t += self.action_chunk
                 overwatch.info(f'Published Step {t}')
+
+    def _preprocess(self, instruction: str) -> dict:
+        """Observe environment and build model inputs.
+
+        Args:
+            instruction (str): Task description for this chunk.
+
+        Returns:
+            dict: Model-ready inputs from the dataset transform.
+        """
+        obs = self.update_observation_window()
+        obs['task_description'] = instruction
+        return self.dataset(obs)
+
+    def _predict_action(self, inputs: dict):
+        """Run model inference to produce normalized actions.
+
+        Override to add RTC guidance, timing, or other prediction logic.
+
+        Args:
+            inputs (dict): Model inputs from _preprocess.
+
+        Returns:
+            Tensor: Normalized action tensor.
+        """
+        return self.vla.predict_action(**inputs)
+
+    def _postprocess_actions(self, raw_action):
+        """Denormalize raw actions into robot command space.
+
+        Override to add trajectory stitching, smoothing, etc.
+
+        Args:
+            raw_action: Normalized action tensor from _predict_action.
+
+        Returns:
+            np.ndarray: Denormalized actions, truncated to action_chunk.
+        """
+        denormalized = self.denormalize_action(
+            dict(action=raw_action.cpu().numpy()))
+        return denormalized[:self.action_chunk]
 
     def _get_user_task_instruction(self, default_instruction: str) -> str:
         """Get task instruction from user input.
@@ -327,6 +370,9 @@ class BaseInferenceRunner:
     def cleanup(self):
         """Clean up resources and shutdown gracefully."""
         overwatch.info('Cleaning up BaseInferenceRunner')
+
+        self._prev_ctx = None
+        self._action_ctx = SimpleNamespace()
 
         # Clear observation window
         if self.observation_window is not None:

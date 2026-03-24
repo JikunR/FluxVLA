@@ -47,30 +47,23 @@ def create_sinusoidal_pos_embedding(
     """Create sinusoidal positional embeddings.
 
     Args:
-        time (torch.Tensor): A 1D tensor of shape `(batch_size, )` representing
-            the time steps for which to compute the positional embeddings.
-        dimension (int): The dimension of the positional embeddings. Must be
-            divisible by 2.
-        min_period (float): The minimum period for the sinusoidal function.
-        max_period (float): The maximum period for the sinusoidal function.
+        time (torch.Tensor): Time values of shape ``(B,)`` or ``(B, T)``.
+        dimension (int): Embedding dimension (must be divisible by 2).
+        min_period (float): Minimum period for the sinusoidal function.
+        max_period (float): Maximum period for the sinusoidal function.
 
     Returns:
-        torch.Tensor: A tensor of shape `(batch_size, dimension)` containing"""
+        torch.Tensor: Shape ``(*time.shape, dimension)``."""
     if dimension % 2 != 0:
         raise ValueError(f'dimension ({dimension}) must be divisible by 2')
-
-    if time.ndim != 1:
-        raise ValueError(
-            'The time tensor is expected to be of shape `(batch_size, )`.')
 
     fraction = torch.linspace(
         0.0, 1.0, dimension // 2, dtype=torch.float32, device=device)
     period = min_period * (max_period / min_period)**fraction
 
-    # Compute the outer product
     scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    sin_input = time[..., None] * scaling_factor
+    pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=-1)
     return pos_emb
 
 

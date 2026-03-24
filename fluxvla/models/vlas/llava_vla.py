@@ -178,6 +178,9 @@ class LlavaVLA(OpenVLA):
                        lang_masks: Optional[torch.Tensor] = None,
                        image_grid_thw: Optional[torch.Tensor] = None,
                        embodiment_ids: Optional[torch.Tensor] = None,
+                       prev_actions: Optional[torch.Tensor] = None,
+                       prefix_len: int = 0,
+                       rtc_config: Optional[Dict] = None,
                        *args,
                        **kwargs):
         if hasattr(self, 'vlm_backbone') and self.vlm_backbone is not None:
@@ -202,5 +205,8 @@ class LlavaVLA(OpenVLA):
             input_features=last_hidden_state,
             states=states,
             attention_mask=fused_attention_mask,
-            embodiment_ids=embodiment_ids)
+            embodiment_ids=embodiment_ids,
+            prev_actions=prev_actions,
+            prefix_len=prefix_len,
+            rtc_config=rtc_config)
         return pred_actions.float()
