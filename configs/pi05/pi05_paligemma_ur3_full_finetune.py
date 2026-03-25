@@ -216,25 +216,19 @@ inference = dict(
     type='URInferenceRunner',
     seed=7,
     task_descriptions={
-        '1': 'put the measuring cylinder back on the tabletop',
-        '2': 'place the erlenmeyer flask back on the tabletop',
-        '3': 'grasp the measuring cylinder',
-        '4': 'grasp the neck of the erlenmeyer flask',
-        '5':
-        'pour the liquid in the transparent wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
-        '6': 'put the transparent wide-mouth bottle back on the tabletop',
-        '7': 'shake the erlenmeyer flask',
-        '8':
-        'pour the liquid in the measuring cylinder into the erlenmeyer flask',
-        '9': 'place the bottle stopper upside down on the tabletop',
-        '10': 'empty',
-        '11': 'grasp the stopper of the transparent wide-mouth bottle',
-        '12': 'grasp the body of the transparent wide-mouth bottle',
-        '13': 'grasp the body of the dark-colored wide-mouth bottle',
-        '14': 'grasp the stopper of the dark-colored wide-mouth bottle',
-        '15':
+        '1': 'grasp the stopper of the dark-colored wide-mouth bottle',
+        '2': 'place the bottle stopper upside down on the tabletop',
+        '3': 'grasp the body of the dark-colored wide-mouth bottle',
+        '4':
         'pour the liquid in the dark-colored wide-mouth bottle into the erlenmeyer flask',  # noqa: E501
-        '16': 'put the dark-colored wide-mouth bottle back on the tabletop'
+        '5': 'put the dark-colored wide-mouth bottle back on the tabletop',
+        '6': 'grasp the measuring cylinder',
+        '7':
+        'pour the liquid in the measuring cylinder into the erlenmeyer flask',
+        '8': 'put the measuring cylinder back on the tabletop',
+        '9': 'grasp the neck of the erlenmeyer flask',
+        '10': 'shake the erlenmeyer flask',
+        '11': 'place the erlenmeyer flask back on the tabletop',
     },
     dataset=dict(
         type='PrivateInferenceDataset',

@@ -63,6 +63,7 @@ def layer_norm_QKV_matmul_bias(x, norm_w, norm_b, qkv_w, qkv_b, out, x_norm,
 
 
 def AttnMultiKey(QKV, num_patches, vit_num_heads, vit_head_dim, vit_hidden):
+    input_dtype = QKV.dtype
     QKV = QKV.view(-1, num_patches, 3, vit_num_heads,
                    vit_head_dim).permute(0, 2, 3, 1, 4)
     Q = QKV[:, 0]
@@ -70,6 +71,8 @@ def AttnMultiKey(QKV, num_patches, vit_num_heads, vit_head_dim, vit_hidden):
     V = QKV[:, 2]
     attn = torch.nn.functional.scaled_dot_product_attention(Q, K, V)
     attn = attn.transpose(1, 2).reshape(Q.shape[0], num_patches, vit_hidden)
+    if attn.dtype != input_dtype:
+        attn = attn.to(input_dtype)
     return attn
 
 

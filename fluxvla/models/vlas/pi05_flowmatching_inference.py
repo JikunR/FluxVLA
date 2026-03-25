@@ -1,50 +1,21 @@
-"""
-PI05 Triton Inference — single CUDA Graph for the entire pipeline.
-
-Combines vision_encoder + transformer_encoder + transformer_decoder into
-ONE CUDA Graph, eliminating inter-graph overhead.
-
-Architecture inference pattern:
-  - L1: raw Triton kernels imported from ``fluxvla.ops``
-  - L2: composed operations (dimension-bound wrappers)
-  - L3: model functions (vision_encoder, transformer_encoder, etc.)
-  - L4: ``PI05FlowMatchingInference`` high-level VLA wrapper with CUDA Graph
-
-Usage::
-
-    model = build_vla_from_cfg(cfg.model)
-    model.load_state_dict(...)
-    patch_with_unified_triton(model, num_views=2, max_prompt_len=48,
-                              chunk_size=10, num_steps=10)
-"""
 import math
 
 import torch
 
 from fluxvla.engines import VLAS
-# yapf: disable
 from fluxvla.ops.atomic_ops import AttnMultiKey  # noqa: E128
-from fluxvla.ops.atomic_ops import (adarms_norm_style_proj, conv2d_embed_res,
-                                    layer_norm_matmul_bias,
-                                    layer_norm_matmul_bias_gelu,
-                                    layer_norm_QKV_matmul_bias, matmul_attn_v,
-                                    matmul_bias_res, matmul_bias_silu,
-                                    matmul_bias_small, matmul_gate,
-                                    matmul_qkv_rope, matmul_res,
-                                    matmul_res_gate, matmul_split_k_bias_res,
-                                    rms_matmul_gate, rms_matmul_qkv_rope)
+from fluxvla.ops.atomic_ops import (
+    adarms_norm_style_proj, conv2d_embed_res, layer_norm_matmul_bias,
+    layer_norm_matmul_bias_gelu, layer_norm_QKV_matmul_bias, matmul_attn_v,
+    matmul_bias_res, matmul_bias_silu, matmul_bias_small, matmul_gate,
+    matmul_qkv_rope, matmul_res, matmul_res_gate, matmul_split_k_bias_res,
+    rms_matmul_gate, rms_matmul_qkv_rope)
 from fluxvla.ops.triton.attention_triton_ops import (
     matmul_abT_scale, softmax_kernel_masklen, softmax_kernel_prefix_suffix)
-# yapf: enable
 from .pi05_flowmatching import PI05FlowMatching
-
-# ---------------------------------------------------------------------------
-# L3: Triton model functions
-# ---------------------------------------------------------------------------
 
 
 def vision_encoder(weights, buffers, num_views, num_vit_layers=27):
-    # SigLIP dimensions for pi05
     num_patches = 256
     vit_hidden = 1152
     vit_intermediate = 4304
@@ -351,11 +322,6 @@ def pi05_model(weights,
                         num_steps)
 
 
-# ---------------------------------------------------------------------------
-# L4: PI05FlowMatchingInference — high-level VLA wrapper with CUDA Graph
-# ---------------------------------------------------------------------------
-
-
 @VLAS.register_module()
 class PI05FlowMatchingInference(PI05FlowMatching):
     """Inference variant of PI05FlowMatching with Triton acceleration.
@@ -369,16 +335,19 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         **kwargs: Forwarded to :class:`PI05FlowMatching`.
     """
 
-    def __init__(self, num_views=2, *args, **kwargs):
+    def __init__(self,
+                 num_views=2,
+                 triton_max_prompt_len=48,
+                 num_steps=10,
+                 *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.num_views = num_views
+        self.triton_max_prompt_len = triton_max_prompt_len
+        self.num_steps = num_steps
         self._triton_ready = False
         self._cuda_graph = None
         self._cuda_graph_ready = False
-
-    # ------------------------------------------------------------------
-    # Triton buffer / weight setup
-    # ------------------------------------------------------------------
 
     def _init_buffers(self):
         nv = self.num_views
@@ -388,71 +357,84 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         bf = torch.bfloat16
         dev = 'cuda'
 
+        img = self._vit_image_size
+        np_ = self._vit_num_patches
+        vh = self._vit_hidden
+        vi = self._vit_intermediate
+        eh = self._enc_hidden
+        ei = self._enc_intermediate
+        dh = self._dec_hidden
+        di = self._dec_intermediate
+        ds = self._dec_style_dim
+        hd = self._head_dim
+        nkv = self._num_kv_heads
+        ad = self._action_dim
+
         self._triton_bufs = {
             'observation_images_normalized':
-            torch.zeros(nv, 224, 224, 3, dtype=bf, device=dev),
+            torch.zeros(nv, img, img, 3, dtype=bf, device=dev),
             'vision_x':
-            torch.zeros(nv, 256, 1152, dtype=bf, device=dev),
+            torch.zeros(nv, np_, vh, dtype=bf, device=dev),
             'vision_x_norm':
-            torch.zeros(nv, 256, 1152, dtype=bf, device=dev),
+            torch.zeros(nv, np_, vh, dtype=bf, device=dev),
             'vision_QKV':
-            torch.zeros(nv, 256, 3 * 1152, dtype=bf, device=dev),
+            torch.zeros(nv, np_, 3 * vh, dtype=bf, device=dev),
             'vision_hidden':
-            torch.zeros(nv, 256, 4304, dtype=bf, device=dev),
+            torch.zeros(nv, np_, vi, dtype=bf, device=dev),
             'vision_x_split_k_buf':
-            torch.zeros(nv * 256 * 1152 * 4, dtype=torch.float32, device=dev),
+            torch.zeros(nv * np_ * vh * 4, dtype=torch.float32, device=dev),
             'encoder_rope_weights':
-            torch.zeros(enc, 256, dtype=bf, device=dev),
+            torch.zeros(enc, hd, dtype=bf, device=dev),
             'encoder_x':
-            torch.zeros(enc, 2048, dtype=bf, device=dev),
+            torch.zeros(enc, eh, dtype=bf, device=dev),
             'encoder_x_norm':
-            torch.zeros(enc, 2048, dtype=bf, device=dev),
+            torch.zeros(enc, eh, dtype=bf, device=dev),
             'encoder_K':
-            torch.zeros(num_kv_layers, enc + dec, 256, dtype=bf, device=dev),
+            torch.zeros(num_kv_layers, enc + dec, hd, dtype=bf, device=dev),
             'encoder_V':
-            torch.zeros(num_kv_layers, enc + dec, 256, dtype=bf, device=dev),
+            torch.zeros(num_kv_layers, enc + dec, hd, dtype=bf, device=dev),
             'encoder_Q':
-            torch.zeros(enc * 8, 256, dtype=bf, device=dev),
+            torch.zeros(enc * nkv, hd, dtype=bf, device=dev),
             'encoder_hidden':
-            torch.zeros(enc, 16384, dtype=bf, device=dev),
+            torch.zeros(enc, ei, dtype=bf, device=dev),
             'valid_encoder_len':
             torch.zeros((1, ), dtype=torch.int32, device=dev),
             'encoder_logits_buf':
-            torch.zeros(enc * 8, enc, dtype=torch.float32, device=dev),
+            torch.zeros(enc * nkv, enc, dtype=torch.float32, device=dev),
             'encoder_attn_buf':
-            torch.zeros(enc * 8, enc, dtype=bf, device=dev),
+            torch.zeros(enc * nkv, enc, dtype=bf, device=dev),
             'encoder_ctx_buf':
-            torch.zeros(enc * 8, 256, dtype=bf, device=dev),
+            torch.zeros(enc * nkv, hd, dtype=bf, device=dev),
             'decoder_rope_weights':
-            torch.zeros(dec, 256, dtype=bf, device=dev),
+            torch.zeros(dec, hd, dtype=bf, device=dev),
             'decoder_x':
-            torch.zeros(dec, 1024, dtype=bf, device=dev),
+            torch.zeros(dec, dh, dtype=bf, device=dev),
             'decoder_x_buf':
-            torch.zeros(dec, 1024, dtype=bf, device=dev),
+            torch.zeros(dec, dh, dtype=bf, device=dev),
             'decoder_action_buf':
-            torch.zeros(dec, 32, dtype=bf, device=dev),
+            torch.zeros(dec, ad, dtype=bf, device=dev),
             'decoder_time_emb':
-            torch.zeros(dec, 1024, dtype=bf, device=dev),
+            torch.zeros(dec, dh, dtype=bf, device=dev),
             'decoder_style':
-            torch.zeros(dec, 1024 * 3, dtype=bf, device=dev),
+            torch.zeros(dec, ds, dtype=bf, device=dev),
             'decoder_norm_factor_buf':
             torch.zeros(dec, dtype=bf, device=dev),
             'decoder_q_buf':
-            torch.zeros(dec * 8, 256, dtype=bf, device=dev),
+            torch.zeros(dec * nkv, hd, dtype=bf, device=dev),
             'decoder_logits_buf':
-            torch.zeros(dec * 8, enc + dec, dtype=torch.float32, device=dev),
+            torch.zeros(dec * nkv, enc + dec, dtype=torch.float32, device=dev),
             'decoder_attn_buf':
-            torch.zeros(dec * 8, enc + dec, dtype=bf, device=dev),
+            torch.zeros(dec * nkv, enc + dec, dtype=bf, device=dev),
             'decoder_hidden':
-            torch.zeros(dec, 4096, dtype=bf, device=dev),
+            torch.zeros(dec, di, dtype=bf, device=dev),
             'decode_split_k_buf':
-            torch.zeros(2, dec, 1024, dtype=torch.float32, device=dev),
+            torch.zeros(2, dec, dh, dtype=torch.float32, device=dev),
             'x_normed_buf':
-            torch.zeros(dec, 1024, dtype=bf, device=dev),
+            torch.zeros(dec, dh, dtype=bf, device=dev),
             'gate_buf':
-            torch.zeros(dec, 1024, dtype=bf, device=dev),
+            torch.zeros(dec, dh, dtype=bf, device=dev),
             'diffusion_noise':
-            torch.zeros(dec, 32, dtype=bf, device=dev),
+            torch.zeros(dec, ad, dtype=bf, device=dev),
         }
 
     def _init_rope_table(self):
@@ -473,10 +455,6 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         start = self.num_views * 256 + prompt_len - 1
         end = start + self._decoder_seq_len
         return self._rope_table[start:end]
-
-    # ------------------------------------------------------------------
-    # CUDA Graph
-    # ------------------------------------------------------------------
 
     def _run_forward(self):
         pi05_model(self._triton_weights, self._triton_bufs, self.num_views,
@@ -529,10 +507,6 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         self._cuda_graph.replay()
         return self._triton_bufs['diffusion_noise']
 
-    # ------------------------------------------------------------------
-    # High-level inference API
-    # ------------------------------------------------------------------
-
     def predict_action(self,
                        images,
                        lang_tokens,
@@ -546,9 +520,9 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         if not self._triton_ready:
             self.prepare_triton_inference(
                 num_views=self.num_views,
-                max_prompt_len=getattr(self, 'triton_max_prompt_len', 48),
+                max_prompt_len=self.triton_max_prompt_len,
                 chunk_size=self.n_action_steps,
-                num_steps=getattr(self, 'num_steps', 10))
+                num_steps=self.num_steps)
             self._triton_ready = True
 
         pixel_values = images.unflatten(1, (-1, 3))[0]
@@ -582,10 +556,6 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         result = denoised[:, :self.max_action_dim].unsqueeze(0).float()
 
         return result
-
-    # ------------------------------------------------------------------
-    # Triton weight preparation
-    # ------------------------------------------------------------------
 
     def _prepare_adarms_cond(self, num_steps):
         """Pre-compute sinusoidal time embeddings for each step."""
@@ -644,10 +614,34 @@ class PI05FlowMatchingInference(PI05FlowMatching):
 
         self._max_prompt_len = max_prompt_len
         self._num_steps = num_steps
-        self._num_vit_layers = 27
+
+        # Vision dimensions (from SigLIP config)
+        vit_cfg = self.vision_backbone.vision.vision_model.config
+        self._vit_image_size = vit_cfg.image_size
+        self._vit_num_patches = (vit_cfg.image_size // vit_cfg.patch_size)**2
+        self._vit_hidden = vit_cfg.hidden_size
+        self._vit_intermediate = vit_cfg.intermediate_size
+        self._num_vit_layers = vit_cfg.num_hidden_layers
+
+        # Encoder dimensions (from Gemma backbone config)
+        enc_cfg = self.llm_backbone.config
+        self._enc_hidden = enc_cfg.hidden_size
+        self._enc_intermediate = enc_cfg.intermediate_size
         self._num_encoder_layers = len(self.llm_backbone.layers)
-        self._num_decoder_layers = 18
-        self._encoder_seq_len = num_views * 256 + max_prompt_len
+
+        # Decoder dimensions (from Gemma expert config)
+        dec_cfg = self.llm_expert.config
+        self._dec_hidden = dec_cfg.hidden_size
+        self._dec_intermediate = dec_cfg.intermediate_size
+        self._dec_style_dim = 3 * self._dec_hidden
+        self._num_decoder_layers = len(self.llm_expert.layers)
+
+        # Shared attention dimensions
+        self._head_dim = enc_cfg.head_dim
+        self._num_kv_heads = enc_cfg.num_attention_heads
+        self._action_dim = self.max_action_dim
+
+        self._encoder_seq_len = num_views * self._vit_num_patches + max_prompt_len
         self._decoder_seq_len = chunk_size
 
         self._init_buffers()
