@@ -1,89 +1,43 @@
-# Real-Time Chunking (RTC)
+# RTC (Real-Time Chunking)
 
-Real-Time Chunking (RTC) uses the previously predicted action sequence as a known prefix to constrain the current denoising process, reducing inconsistencies between consecutive action chunks and improving smoothness under asynchronous execution.
+RTC (Real-Time Chunking) constrains the current denoising process with a known action prefix from previous predictions. This reduces inconsistencies between adjacent action chunks and improves trajectory continuity under asynchronous execution.
 
 > **Reference**: [Physical Intelligence Kinetix — Real-Time Chunking](https://github.com/Physical-Intelligence/real-time-chunking-kinetix)
 
-## Overview
+## Training-time RTC
 
-Standard action chunking independently generates a full action sequence at each inference step, which can cause jitter between adjacent chunks. RTC addresses this with two key ideas:
+### Method
 
-1. **Training**: Randomly simulate execution delays so the model learns to predict future actions given a known prefix of already-executed actions.
-2. **Inference**: Lock the not-yet-finished portion of the previous prediction as a prefix in the current denoising process, ensuring coherence between new and historical actions.
+Training-time RTC applies a shared prefix-conditioning principle to both training and inference:
 
-FluxVLA supports two RTC inference modes:
+- During training, the model is optimized under known-prefix constraints for consistent future-action prediction.
+- During inference, prefix locking is applied to preserve cross-chunk continuity.
 
-| Mode       | Requires RTC Training | Mechanism                                                                                                        |
-| ---------- | --------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `prefix`   | Yes                   | Locks prefix positions to clean time during denoising, directly splicing known actions                           |
-| `guidance` | No                    | Corrects the velocity field to align the denoising trajectory with the known prefix (no special training needed) |
+In this document, Training-time RTC means the combined setup of prefix-conditioned training and prefix-mode inference.
 
-## Configuration
+### Configuration
 
-RTC is enabled by layering two config sections on top of any existing training config. Below are the templates and parameter descriptions.
+#### Training-side configuration
 
-### Training Config (`rtc_training_config`)
-
-Add to `model.vla_head`:
+Add `rtc_training_config` under `model.vla_head`:
 
 ```python
-model = dict(
-    vla_head=dict(
-        rtc_training_config=dict(
-            enabled=True,        # Enable RTC training
-            max_delay=7,         # Max simulated delay steps
-            distribution='exponential',  # Delay sampling distribution:
-                                         #   'exponential' — favors small delays (recommended)
-                                         #   'uniform'     — uniform distribution
-        )))
-```
-
-**How it works**: During training, a delay value `d ∈ [0, max_delay)` is randomly sampled per batch element. The first `d` steps of the action sequence have their time set to clean (known), and these positions are masked out from the loss.
-
-### Inference Config (`inference`)
-
-RTC inference uses `AlohaRTCInferenceRunner` (inherits from `AlohaInferenceRunner`) with a dedicated `rtc_config`. Add at the top level of the config file:
-
-```python
-inference = dict(
-    type='AlohaRTCInferenceRunner',  # Use RTC runner instead of AlohaInferenceRunner
-    async_execution=True,   # Enable async execution (inference and execution run in parallel)
-    execute_horizon=10,     # Number of action steps to execute per cycle
-    rtc_config=dict(
-        enabled=True,
-        method='prefix',    # RTC mode:
-                            #   'prefix'   — requires RTC training, locks prefix (recommended)
-                            #   'guidance'  — no training needed, velocity field guidance
-        prefix_len=5,       # Prefix length (number of locked known action steps)
-
-        # ---- guidance mode only ----
-        # decay_end=10,           # Position where guidance weight decays to 0
-        # schedule='exp',         # Decay schedule: 'exp', 'linear', 'ones', 'zeros'
-        # max_guidance_weight=5.0, # Upper bound for guidance weight
-        # use_vjp=False,          # Use VJP correction (more precise but slower)
-    ))
-```
-
-### Full Example: Enabling RTC on an Existing Config
-
-Using PI0.5 + ALOHA as an example:
-
-```python
-_base_ = './pi05_paligemma_aloha_full_finetune.py'
-
-# Training: add RTC noise conditioning
 model = dict(
     vla_head=dict(
         rtc_training_config=dict(
             enabled=True,
             max_delay=7,
-            distribution='exponential',
+            distribution='exponential',  # 'exponential' (recommended) or 'uniform'
         )))
+```
 
-# RTC can be fine-tuned on a pretrained checkpoint, e.g. 1 epoch
-runner = dict(max_epochs=1)
+Mechanism: for each batch element, sample a delay `d ∈ [0, max_delay)`. The first `d` action steps are set to clean time (known no-noise states) and masked out from the loss.
 
-# Inference: use RTC runner with async execution + prefix RTC
+#### Inference-side configuration
+
+Use prefix mode in `rtc_config` and keep `async_execution=True`:
+
+```python
 inference = dict(
     type='AlohaRTCInferenceRunner',
     async_execution=True,
@@ -95,23 +49,118 @@ inference = dict(
     ))
 ```
 
-For GR00T or other models, simply replace `_base_` with the corresponding base training config. The RTC parameters are model-agnostic.
+### Complete example
+
+The following example uses GR00T deployed on ALOHA:
+
+```python
+_base_ = './gr00t/gr00t_eagle_3b_aloha_full_finetune.py'
+
+# Training: enable RTC prefix conditioning
+model = dict(
+    vla_head=dict(
+        rtc_training_config=dict(
+            enabled=True,
+            max_delay=7,
+            distribution='exponential',
+        )))
+
+# Optional continued finetuning from a pretrained checkpoint
+runner = dict(max_epochs=1)
+
+# Inference: use prefix mode with async execution enabled
+inference = dict(
+    type='AlohaRTCInferenceRunner',
+    async_execution=True,
+    execute_horizon=10,
+    rtc_config=dict(
+        enabled=True,
+        method='prefix',
+        prefix_len=5,
+    ))
+```
+
+## Test-time RTC
+
+### Method
+
+Test-time RTC is an inference-only guidance method:
+
+- Training remains unchanged.
+- During inference, guidance steers the denoising trajectory toward prefix-consistent outputs.
+- Use this method when training was performed without RTC prefix conditioning.
+
+In this document, Test-time RTC means the inference-only guidance setup.
+
+### Configuration
+
+Set guidance mode in `rtc_config` (with `async_execution=True`):
+
+```python
+inference = dict(
+    type='AlohaRTCInferenceRunner',
+    async_execution=True,
+    execute_horizon=10,
+    rtc_config=dict(
+        enabled=True,
+        method='guidance',
+        prefix_len=5,
+        decay_end=10,
+        schedule='exp',
+        max_guidance_weight=5.0,
+        use_vjp=False,
+    ))
+```
+
+### Difference from Training-time RTC
+
+- Training-time RTC: modifies training and uses `method='prefix'` at inference.
+- Test-time RTC: keeps training unchanged and uses `method='guidance'` at inference.
+- In a single inference pass, `prefix` and `guidance` are typically used as alternative routes.
 
 ## Testing
 
-Use `scripts/test_rtc.py` to visualize the RTC denoising process:
+The repository provides `scripts/test_rtc.py` to test and visualize RTC inference behavior. It:
+
+- loads model weights from config + checkpoint,
+- fetches one batch from the training dataset,
+- uses ground-truth actions to simulate `prev_actions` (the prefix source in this test),
+- runs `no RTC`, `prefix`, `guidance`, and `guidance+vjp`,
+- outputs per-dimension denoising plots and comparison plots.
+
+Using GT as the prefix source keeps the prefix condition controlled and makes differences between RTC methods easier to compare.
+
+Example command:
 
 ```bash
 python scripts/test_rtc.py \
-    --config configs/pi05/pi05_paligemma_aloha_full_finetune.py \
+    --config configs/gr00t/gr00t_eagle_3b_aloha_full_finetune.py \
     --checkpoint /path/to/checkpoint.pt \
     --prefix_len 5 \
     --output_dir work_dirs/rtc_test
 ```
 
-## Supported Models
+## Test visualization
 
-| Model                       | RTC Training | Prefix Inference | Guidance Inference |
-| --------------------------- | ------------ | ---------------- | ------------------ |
-| FlowMatchingHead (GR00T)    | ✅           | ✅               | ✅                 |
-| PI0FlowMatching (PI0/PI0.5) | ✅           | ✅               | ✅                 |
+<p align="center">
+  <img src="../assets/rtc_comparison_prefix_len_5.png" alt="RTC comparison (prefix_len=5)" width="720">
+</p>
+
+This figure compares trajectories from `no RTC`, `prefix`, `guidance`, and `guidance+vjp`.
+The shaded prefix window marks the known-action region used during RTC inference.
+
+Qualitative interpretation:
+
+- In this figure, GT serves both as the reference trajectory and as the simulated prefix source for RTC.
+- The `no RTC` curve serves as the unconstrained baseline.
+- `prefix` mode (training-time RTC path) often follows a different trajectory from `no RTC` after the prefix window, indicating stronger prefix-conditioned continuation.
+- `guidance` mode (test-time RTC path, including `guidance` and `guidance+vjp`) often stays closer to the `no RTC` baseline in later steps, while mainly improving the transition near the prefix-to-generation boundary.
+
+This figure is intended as a qualitative reference for comparing post-prefix trajectory behavior between training-time RTC and test-time RTC.
+
+## Supported models
+
+| Model                       | Training-time RTC | Test-time RTC |
+| --------------------------- | ----------------- | ------------- |
+| FlowMatchingHead (GR00T)    | ✅                | ✅            |
+| PI0FlowMatching (PI0/PI0.5) | ✅                | ✅            |
