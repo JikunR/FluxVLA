@@ -589,6 +589,12 @@ class PI0FlowMatching(BaseVLA):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
+        # `time` is the sampled scalar flow-matching time, shape (B,).
+        # Below we derive `t` which is passed to embed_suffix as the timestep:
+        #   - RTC:     t is (B, T), per-position time (delay positions get
+        #              0.0, meaning clean in PI0 convention).
+        #   - vanilla: t keeps (B,), same time for all positions. Must stay
+        #              1-D because PI05 embed_suffix only accepts (B,).
         T = actions.shape[1]
         if (self.rtc_training_config
                 and self.rtc_training_config.get('enabled', False)):
@@ -600,13 +606,13 @@ class PI0FlowMatching(BaseVLA):
                 distribution=self.rtc_training_config.get(
                     'distribution', 'exponential'),
                 device=actions.device)
-            # Per-position time: 0.0 at delay positions (PI0: time=0 is clean)
             t, action_masks = apply_rtc_time_conditioning(
                 time, action_masks, delays, T, clean_time=0.0)  # (B, T)
+            x_t = t.unsqueeze(-1) * noise + (1 - t.unsqueeze(-1)) * actions
         else:
-            t = time.unsqueeze(1).expand(-1, T)  # (B, T)
+            t = time  # (B,)
+            x_t = t[:, None, None] * noise + (1 - t[:, None, None]) * actions
 
-        x_t = t.unsqueeze(-1) * noise + (1 - t.unsqueeze(-1)) * actions
         u_t = noise - actions
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images=images,
@@ -702,15 +708,17 @@ class PI0FlowMatching(BaseVLA):
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
         while time >= -dt / 2:
             t_batch = time.expand(bsize)
-            v_t = apply_rtc_guidance(
+            # PI0 uses opposite velocity sign.
+            # rtc_guidance expects: 0=noise, 1=clean.
+            v_fm = apply_rtc_guidance(
                 x_t,
-                lambda x: denoise(x, t_batch),
+                lambda x: -denoise(x, t_batch),
                 prev_actions,
                 prefix_weights,
                 1.0 - time.item(),
                 max_gw,
                 use_vjp=use_vjp)
-            x_t += dt * v_t
+            x_t += dt * (-v_fm)
             time += dt
         return x_t
 
@@ -758,6 +766,11 @@ class PI0FlowMatching(BaseVLA):
 
         dt = -1.0 / self.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        if (prev_actions is not None and self.ori_action_dim is not None
+                and prev_actions.shape[-1] < self.max_action_dim):
+            pad_size = self.max_action_dim - prev_actions.shape[-1]
+            prev_actions = F.pad(prev_actions, (0, pad_size), value=0.0)
 
         rtc_method = None
         if prev_actions is not None and prefix_len > 0 and rtc_config:

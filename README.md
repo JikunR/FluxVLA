@@ -251,6 +251,7 @@ huggingface-cli download yinchimaoliang/pi05_paligemma_libero_10_full_finetune_b
 - Support Parquet datasets and enable the loading of data in the LeRobot format.
 - Support resuming training from checkpoints.
 - Support accelerated inference for Gr00t and PI0.5; on A100 hardware, Gr00t achieves around 5x speedup and PI0.5 achieves around 15x speedup.
+- Support [RTC (Real-Time Chunking)](docs/rtc.md) for improved cross-chunk trajectory continuity.
 
 ## Usage
 

@@ -60,6 +60,37 @@ class PI05FlowMatching(PI0FlowMatching):
         **kwargs: Additional keyword arguments for model configuration.
     """
 
+    def __init__(self, **kwargs):
+        rtc_cfg = kwargs.get('rtc_training_config')
+        if rtc_cfg and rtc_cfg.get('enabled', False):
+            raise ValueError(
+                'PI05FlowMatching does not support training-time RTC. '
+                'Its architecture cannot inject per-position timesteps '
+                'without model modifications. Please disable '
+                'rtc_training_config or use test-time RTC (guidance) '
+                'instead.')
+        super().__init__(**kwargs)
+
+    def predict_action(self,
+                       *args,
+                       rtc_config=None,
+                       prev_actions=None,
+                       prefix_len=0,
+                       **kwargs):
+        if (prev_actions is not None and prefix_len > 0 and rtc_config
+                and rtc_config.get('method', 'prefix') == 'prefix'):
+            raise ValueError(
+                'PI05FlowMatching does not support RTC prefix mode at '
+                'inference. Its embed_suffix only accepts a scalar timestep '
+                'and cannot handle per-position time injection. '
+                "Use method='guidance' for test-time RTC instead.")
+        return super().predict_action(
+            *args,
+            rtc_config=rtc_config,
+            prev_actions=prev_actions,
+            prefix_len=prefix_len,
+            **kwargs)
+
     def embed_suffix(self, states, noisy_actions, timestep):
         """Embed the suffix tokens for the Pi0 head.
 

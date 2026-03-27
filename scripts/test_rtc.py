@@ -18,11 +18,19 @@ and runs predict_action with/without RTC. Produces per-dimension
 denoising process visualizations with prefix regions highlighted.
 
 Usage:
+    # GR00T / PI0 — run all modes
     python scripts/test_rtc.py \
         --config configs/gr00t/xxx.py \
         --checkpoint /path/to/checkpoint.pt \
         --prefix_len 5 \
         --output_dir work_dirs/rtc_test
+
+    # PI0.5 — skip prefix (unsupported), run guidance only
+    python scripts/test_rtc.py \
+        --config configs/pi05/xxx.py \
+        --checkpoint /path/to/checkpoint.pt \
+        --prefix_len 5 \
+        --modes no_rtc guidance guidance_vjp
 """
 
 import argparse
@@ -96,17 +104,29 @@ def predict_with_intermediates(model,
                                seed=42):
     """Run predict_action and capture intermediate denoising steps.
 
-    Monkey-patches the head's denoise loop to record x_t at each step.
+    Monkey-patches the denoise loop to record x_t at each step.
+    Supports both GR00T (denoise_step on model.vla_head) and
+    PI0/PI0.5 (denoise_step directly on model).
     """
-    head = model.vla_head
+    # Determine where denoise_step lives
+    if (hasattr(model, 'vla_head') and model.vla_head is not None
+            and hasattr(model.vla_head, 'denoise_step')):
+        target = model.vla_head  # GR00T / LlavaVLA
+        is_pi0 = False
+    else:
+        target = model  # PI0 / PI0.5
+        is_pi0 = True
+
     intermediates = []
 
     # Hook into denoise_step to capture actions at each step
-    orig_denoise = head.denoise_step
+    orig_denoise = target.denoise_step
 
     def hooked_denoise(*args, **kwargs):
-        # args[0] is the current actions tensor
-        intermediates.append(args[0].detach().cpu().float().clone())
+        # For GR00T: args[0] is actions tensor
+        # For PI0:   args[3] is x_t (states, prefix_pad_masks, pkv, x_t, ...)
+        capture_idx = 3 if is_pi0 else 0
+        intermediates.append(args[capture_idx].detach().cpu().float().clone())
         return orig_denoise(*args, **kwargs)
 
     # Ensure images is a list (predict_action expects List[Tensor])
@@ -114,23 +134,28 @@ def predict_with_intermediates(model,
     if isinstance(images, torch.Tensor) and images.ndim == 5:
         images = [images[:, i] for i in range(images.shape[1])]
 
-    head.denoise_step = hooked_denoise
+    # Build kwargs compatible with both model types
+    predict_kwargs = dict(
+        images=images,
+        lang_tokens=batch['lang_tokens'],
+        states=batch['states'],
+        img_masks=batch.get('img_masks'),
+        lang_masks=batch.get('lang_masks'),
+        prev_actions=prev_actions,
+        prefix_len=prefix_len,
+        rtc_config=rtc_config,
+    )
+    if not is_pi0:
+        # GR00T accepts embodiment_ids; PI0 does not
+        predict_kwargs['embodiment_ids'] = batch.get('embodiment_ids')
+
+    target.denoise_step = hooked_denoise
     try:
         torch.manual_seed(seed)
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-            pred = model.predict_action(
-                images=images,
-                lang_tokens=batch['lang_tokens'],
-                states=batch['states'],
-                img_masks=batch.get('img_masks'),
-                lang_masks=batch.get('lang_masks'),
-                embodiment_ids=batch.get('embodiment_ids'),
-                prev_actions=prev_actions,
-                prefix_len=prefix_len,
-                rtc_config=rtc_config,
-            )
+            pred = model.predict_action(**predict_kwargs)
     finally:
-        head.denoise_step = orig_denoise
+        target.denoise_step = orig_denoise
 
     # Append final prediction
     intermediates.append(pred.detach().cpu().clone())
@@ -228,24 +253,28 @@ def plot_denoising_per_dim(intermediates,
     plt.close()
 
 
-def plot_comparison(pred_no_rtc,
-                    pred_prefix,
-                    pred_guidance,
+def plot_comparison(results,
+                    mode_configs,
                     gt_actions,
                     prefix_len,
-                    pred_vjp=None,
                     save_path=None):
-    """Compare predictions with/without RTC across all dimensions.
+    """Compare predictions across all run RTC modes.
 
     Args:
-        pred_no_rtc (torch.Tensor): Predictions without RTC.
-        pred_prefix (torch.Tensor): Predictions with RTC prefix mode.
-        pred_guidance (torch.Tensor): Predictions with RTC guidance mode.
+        results (dict): Mapping mode_name -> (pred, intermediates, elapsed).
+        mode_configs (dict): Mapping mode_name -> (display_name, kwargs).
         gt_actions (torch.Tensor): Ground truth actions of shape (1, T, D).
         prefix_len (int): Number of prefix steps (highlighted region).
-        pred_vjp (torch.Tensor, optional): Predictions with guidance+VJP.
         save_path (str, optional): Where to save the plot.
     """
+    # Style per mode: (color, linestyle)
+    mode_styles = {
+        'no_rtc': ('r', '--'),
+        'prefix': ('b', '-'),
+        'guidance': ('g', '-'),
+        'guidance_vjp': ('m', '--'),
+    }
+
     action_dim = gt_actions.shape[-1]
     T = gt_actions.shape[1]
 
@@ -265,37 +294,16 @@ def plot_comparison(pred_no_rtc,
         gt = gt_actions[0, :, d].numpy()
         ax.plot(range(T), gt, 'k-', linewidth=2, alpha=0.4, label='GT')
 
-        if pred_no_rtc is not None:
+        for mode, (pred, _, _) in results.items():
+            display = mode_configs[mode][0]
+            color, ls = mode_styles.get(mode, ('tab:gray', '-'))
             ax.plot(
                 range(T),
-                pred_no_rtc[0, :, d].cpu().numpy(),
-                'r--',
+                pred[0, :, d].cpu().numpy(),
+                color=color,
+                linestyle=ls,
                 linewidth=1,
-                label='no RTC',
-                alpha=0.7)
-        if pred_prefix is not None:
-            ax.plot(
-                range(T),
-                pred_prefix[0, :, d].cpu().numpy(),
-                'b-',
-                linewidth=1,
-                label='prefix',
-                alpha=0.7)
-        if pred_guidance is not None:
-            ax.plot(
-                range(T),
-                pred_guidance[0, :, d].cpu().numpy(),
-                'g-',
-                linewidth=1,
-                label='guidance',
-                alpha=0.7)
-        if pred_vjp is not None:
-            ax.plot(
-                range(T),
-                pred_vjp[0, :, d].cpu().numpy(),
-                'm--',
-                linewidth=1,
-                label='guid+vjp',
+                label=display,
                 alpha=0.7)
 
         ax.set_title(f'dim {d}', fontsize=10)
@@ -311,12 +319,19 @@ def plot_comparison(pred_no_rtc,
     plt.close()
 
 
+ALL_RTC_MODES = ['no_rtc', 'prefix', 'guidance', 'guidance_vjp']
+
+
 def main():
     """Entry point for RTC end-to-end testing.
 
     Loads model and data from config, runs predict_action under
-    different RTC modes (none, prefix, guidance, guidance+VJP),
-    and generates per-dimension denoising visualizations.
+    selected RTC modes, and generates per-dimension denoising
+    visualizations.
+
+    Use ``--modes`` to choose which modes to run.  Defaults to all
+    four modes; pass a subset for models that do not support certain
+    modes (e.g. PI0.5 does not support ``prefix``).
     """
     parser = argparse.ArgumentParser(description='End-to-end RTC test')
     parser.add_argument(
@@ -327,6 +342,13 @@ def main():
         '--prefix_len', type=int, default=5, help='RTC prefix length')
     parser.add_argument('--output_dir', type=str, default='work_dirs/rtc_test')
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument(
+        '--modes',
+        nargs='+',
+        default=ALL_RTC_MODES,
+        choices=ALL_RTC_MODES,
+        help='RTC modes to test (default: all). '
+        'E.g. --modes no_rtc guidance guidance_vjp')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -346,124 +368,100 @@ def main():
     # (as if the previous chunk predicted them correctly)
     prev_actions = gt_actions.to(device)
 
+    modes = args.modes
+    print(f'Model: {type(model).__name__}')
     print(f'Action shape: {gt_actions.shape}, prefix_len={prefix_len}')
+    print(f'Modes: {modes}')
 
-    # 1. Predict without RTC
-    print('\n--- No RTC ---')
-    t0 = time_mod.time()
-    pred_no_rtc, inter_no_rtc = predict_with_intermediates(model, batch)
-    t_no_rtc = time_mod.time() - t0
-    print(f'  Time: {t_no_rtc:.3f}s')
+    # -- Mode definitions -----------------------------------------------------
+    # Each mode: (display_name, predict_with_intermediates kwargs)
+    mode_configs = {
+        'no_rtc': ('No RTC', {}),
+        'prefix': ('RTC prefix',
+                   dict(
+                       prefix_len=prefix_len,
+                       prev_actions=prev_actions,
+                       rtc_config={
+                           'method': 'prefix',
+                           'enabled': True
+                       },
+                   )),
+        'guidance': ('RTC guidance',
+                     dict(
+                         prefix_len=prefix_len,
+                         prev_actions=prev_actions,
+                         rtc_config={
+                             'method': 'guidance',
+                             'enabled': True,
+                             'max_guidance_weight': 5.0,
+                             'schedule': 'exp',
+                             'decay_end': prefix_len * 2,
+                         },
+                     )),
+        'guidance_vjp': ('RTC guidance+VJP',
+                         dict(
+                             prefix_len=prefix_len,
+                             prev_actions=prev_actions,
+                             rtc_config={
+                                 'method': 'guidance',
+                                 'enabled': True,
+                                 'max_guidance_weight': 5.0,
+                                 'schedule': 'exp',
+                                 'decay_end': prefix_len * 2,
+                                 'use_vjp': True,
+                             },
+                         )),
+    }
 
-    # 2. Predict with RTC prefix mode
-    print('\n--- RTC prefix mode ---')
-    t0 = time_mod.time()
-    pred_prefix, inter_prefix = predict_with_intermediates(
-        model,
-        batch,
-        prefix_len=prefix_len,
-        prev_actions=prev_actions,
-        rtc_config={
-            'method': 'prefix',
-            'enabled': True
-        })
-    t_prefix = time_mod.time() - t0
-    print(f'  Time: {t_prefix:.3f}s')
+    # -- Run selected modes ---------------------------------------------------
+    results = {}  # name -> (pred, intermediates, elapsed)
+    for mode in modes:
+        display_name, kwargs = mode_configs[mode]
+        print(f'\n--- {display_name} ---')
+        t0 = time_mod.time()
+        pred, inter = predict_with_intermediates(model, batch, **kwargs)
+        elapsed = time_mod.time() - t0
+        print(f'  Time: {elapsed:.3f}s')
+        results[mode] = (pred, inter, elapsed)
 
-    # 3. Predict with RTC guidance mode
-    print('\n--- RTC guidance mode ---')
-    t0 = time_mod.time()
-    pred_guidance, inter_guidance = predict_with_intermediates(
-        model,
-        batch,
-        prefix_len=prefix_len,
-        prev_actions=prev_actions,
-        rtc_config={
-            'method': 'guidance',
-            'enabled': True,
-            'max_guidance_weight': 5.0,
-            'schedule': 'exp',
-            'decay_end': prefix_len * 2
-        })
-    t_guidance = time_mod.time() - t0
-    print(f'  Time: {t_guidance:.3f}s')
-
-    # 4. Predict with RTC guidance + VJP mode
-    print('\n--- RTC guidance+VJP mode ---')
-    t0 = time_mod.time()
-    pred_vjp, inter_vjp = predict_with_intermediates(
-        model,
-        batch,
-        prefix_len=prefix_len,
-        prev_actions=prev_actions,
-        rtc_config={
-            'method': 'guidance',
-            'enabled': True,
-            'max_guidance_weight': 5.0,
-            'schedule': 'exp',
-            'decay_end': prefix_len * 2,
-            'use_vjp': True
-        })
-    t_vjp = time_mod.time() - t0
-    print(f'  Time: {t_vjp:.3f}s')
-
+    # -- Timing summary -------------------------------------------------------
+    t_base = results[modes[0]][2]  # first mode as baseline
     print('\n=== Timing ===')
-    print(f'  no_rtc:       {t_no_rtc:.3f}s')
-    print(f'  prefix:       {t_prefix:.3f}s ({t_prefix/t_no_rtc:.1f}x)')
-    print(f'  guidance:     {t_guidance:.3f}s '
-          f'({t_guidance/t_no_rtc:.1f}x)')
-    print(f'  guidance+vjp: {t_vjp:.3f}s ({t_vjp/t_no_rtc:.1f}x)')
+    for mode in modes:
+        t = results[mode][2]
+        display = mode_configs[mode][0]
+        ratio = f' ({t / t_base:.1f}x)' if mode != modes[0] else ''
+        print(f'  {display:20s}: {t:.3f}s{ratio}')
 
-    # 5. Metrics
+    # -- Overlap L2 (prefix region) -------------------------------------------
     print('\n=== Overlap L2 (prefix region) ===')
-    for name, pred in [('no_rtc', pred_no_rtc), ('prefix', pred_prefix),
-                       ('guidance', pred_guidance), ('guid+vjp', pred_vjp)]:
-        if pred is not None:
-            overlap = pred[:, :prefix_len].cpu() - gt_actions[:, :prefix_len]
-            l2 = overlap.pow(2).mean().sqrt().item()
-            print(f'  {name:10s}: L2={l2:.4f}')
+    for mode in modes:
+        p = results[mode][0]
+        display = mode_configs[mode][0]
+        overlap = p[:, :prefix_len].cpu() - gt_actions[:, :prefix_len]
+        l2 = overlap.pow(2).mean().sqrt().item()
+        print(f'  {display:20s}: L2={l2:.4f}')
 
-    # 5. Per-dimension denoising visualization
-    plot_denoising_per_dim(
-        inter_no_rtc,
-        gt_actions,
-        prefix_len=0,
-        title_prefix='No RTC: ',
-        save_path=os.path.join(args.output_dir, 'denoise_no_rtc.png'))
+    # -- Per-dimension denoising visualization --------------------------------
+    for mode in modes:
+        display = mode_configs[mode][0]
+        use_prefix = (mode != 'no_rtc')
+        plot_denoising_per_dim(
+            results[mode][1],
+            gt_actions,
+            prefix_len=prefix_len if use_prefix else 0,
+            prev_actions=prev_actions.cpu() if use_prefix else None,
+            title_prefix=f'{display}: ',
+            save_path=os.path.join(args.output_dir, f'denoise_{mode}.png'))
 
-    plot_denoising_per_dim(
-        inter_prefix,
-        gt_actions,
-        prefix_len=prefix_len,
-        prev_actions=prev_actions.cpu(),
-        title_prefix='RTC Prefix: ',
-        save_path=os.path.join(args.output_dir, 'denoise_prefix.png'))
-
-    plot_denoising_per_dim(
-        inter_guidance,
-        gt_actions,
-        prefix_len=prefix_len,
-        prev_actions=prev_actions.cpu(),
-        title_prefix='RTC Guidance: ',
-        save_path=os.path.join(args.output_dir, 'denoise_guidance.png'))
-
-    plot_denoising_per_dim(
-        inter_vjp,
-        gt_actions,
-        prefix_len=prefix_len,
-        prev_actions=prev_actions.cpu(),
-        title_prefix='RTC Guidance+VJP: ',
-        save_path=os.path.join(args.output_dir, 'denoise_vjp.png'))
-
-    # 7. Comparison plot
+    # -- Comparison plot ------------------------------------------------------
     plot_comparison(
-        pred_no_rtc.cpu(),
-        pred_prefix.cpu(),
-        pred_guidance.cpu(),
+        results,
+        mode_configs,
         gt_actions,
         prefix_len,
-        pred_vjp=pred_vjp.cpu(),
-        save_path=os.path.join(args.output_dir, 'comparison.png'))
+        save_path=os.path.join(args.output_dir,
+                               f'rtc_comparison_prefix_len_{prefix_len}.png'))
 
     print(f'\nAll plots saved to {args.output_dir}/')
 

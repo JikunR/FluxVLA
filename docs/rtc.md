@@ -19,7 +19,9 @@ In this document, Training-time RTC means the combined setup of prefix-condition
 
 #### Training-side configuration
 
-Add `rtc_training_config` under `model.vla_head`:
+The placement of `rtc_training_config` depends on the model architecture:
+
+**GR00T (FlowMatchingHead)** — add under `model.vla_head`:
 
 ```python
 model = dict(
@@ -30,6 +32,20 @@ model = dict(
             distribution='exponential',  # 'exponential' (recommended) or 'uniform'
         )))
 ```
+
+**PI0 (PI0FlowMatching)** — add directly under `model`:
+
+```python
+model = dict(
+    type='PI0FlowMatching',
+    rtc_training_config=dict(
+        enabled=True,
+        max_delay=7,
+        distribution='exponential',  # 'exponential' (recommended) or 'uniform'
+    ))
+```
+
+> **Note**: PI0.5 (`PI05FlowMatching`) does not support training-time RTC.
 
 Mechanism: for each batch element, sample a delay `d ∈ [0, max_delay)`. The first `d` action steps are set to clean time (known no-noise states) and masked out from the loss.
 
@@ -125,19 +141,29 @@ The repository provides `scripts/test_rtc.py` to test and visualize RTC inferenc
 - loads model weights from config + checkpoint,
 - fetches one batch from the training dataset,
 - uses ground-truth actions to simulate `prev_actions` (the prefix source in this test),
-- runs `no RTC`, `prefix`, `guidance`, and `guidance+vjp`,
+- runs selected RTC modes (configurable via `--modes`),
 - outputs per-dimension denoising plots and comparison plots.
+
+Available modes: `no_rtc`, `prefix`, `guidance`, `guidance_vjp`. All modes run by default.
 
 Using GT as the prefix source keeps the prefix condition controlled and makes differences between RTC methods easier to compare.
 
-Example command:
+Example commands:
 
 ```bash
+# GR00T / PI0 — run all modes (default)
 python scripts/test_rtc.py \
     --config configs/gr00t/gr00t_eagle_3b_aloha_full_finetune.py \
     --checkpoint /path/to/checkpoint.pt \
     --prefix_len 5 \
     --output_dir work_dirs/rtc_test
+
+# PI0.5 — skip prefix mode (unsupported)
+python scripts/test_rtc.py \
+    --config configs/pi05/pi05_paligemma_aloha_full_finetune.py \
+    --checkpoint /path/to/checkpoint.pt \
+    --prefix_len 5 \
+    --modes no_rtc guidance guidance_vjp
 ```
 
 ## Test visualization
@@ -160,7 +186,11 @@ This figure is intended as a qualitative reference for comparing post-prefix tra
 
 ## Supported models
 
-| Model                       | Training-time RTC | Test-time RTC |
-| --------------------------- | ----------------- | ------------- |
-| FlowMatchingHead (GR00T)    | ✅                | ✅            |
-| PI0FlowMatching (PI0/PI0.5) | ✅                | ✅            |
+| Model                    | Training-time RTC | Test-time RTC |
+| ------------------------ | ----------------- | ------------- |
+| FlowMatchingHead (GR00T) | ✅                | ✅            |
+| PI0FlowMatching (PI0)    | ✅                | ✅            |
+| PI05FlowMatching (PI0.5) | ❌                | ✅            |
+
+> **Note**: PI0.5 does not support training-time RTC — its architecture
+> cannot inject per-position timesteps without model modifications.

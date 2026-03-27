@@ -488,6 +488,11 @@ class FlowMatchingHead(nn.Module):
         )
         dt = 1.0 / self.num_inference_timesteps
 
+        if (prev_actions is not None and self.ori_action_dim is not None
+                and prev_actions.shape[-1] < self.action_dim):
+            pad_size = self.action_dim - prev_actions.shape[-1]
+            prev_actions = F.pad(prev_actions, (0, pad_size), value=0.0)
+
         rtc_method = None
         if prev_actions is not None and prefix_len > 0 and rtc_config:
             rtc_method = rtc_config.get('method', 'prefix')
