@@ -57,9 +57,12 @@ work_dirs
 checkpoints/*
 !checkpoints/.gitkeep
 
+# Ignore datasets folder contents but keep the folder
+datasets/*
+!datasets/.gitkeep
+
 # Ignore vscode directories
 .vscode/
 
 # Ignore local experiment directories
-sober/
-realtime-vla-pi05
+src/

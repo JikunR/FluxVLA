@@ -68,7 +68,6 @@ inference_model = dict(
             num_attention_heads=32,
             num_layers=16,
             output_dim=1024,
-            use_torch_compile=True,
             positional_embeddings=None)))
 
 train_dataloader = dict(
@@ -215,7 +214,7 @@ train_dataloader = dict(
 
 runner = dict(
     type='FSDPTrainRunner',
-    max_epochs=24,
+    max_epochs=18,
     learning_rate=1.5e-5,
     weight_decay=0.0,
     max_grad_norm=1.0,

@@ -12,20 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 
 import numpy as np
 
 from fluxvla.engines.utils import build_tokenizer_from_cfg
 
+MODEL_PATH = 'checkpoints/openvla-7b-finetuned-libero-10'
 
+
+@unittest.skipUnless(
+    os.path.exists(MODEL_PATH), f'Checkpoint not found: {MODEL_PATH}')
 class TestActionTokenizer(unittest.TestCase):
 
     def setUp(self):
         self.cfg = {
             'type': 'ActionTokenizer',
-            'model_path':
-            '/limx/tos/users/liyinhao/projects/openvla/openvla/openvla-7b',  # noqa: E501
+            'model_path': MODEL_PATH,
             'bins': 256,
             'min_action': -1,
             'max_action': 1,

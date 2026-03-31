@@ -68,7 +68,6 @@ inference_model = dict(
             num_attention_heads=32,
             num_layers=16,
             output_dim=1024,
-            use_torch_compile=True,
             positional_embeddings=None)))
 
 train_dataloader = dict(
