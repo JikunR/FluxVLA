@@ -16,8 +16,11 @@ import time
 
 import torch
 
+from ..utils import initialize_overwatch
 from ..utils.root import RUNNERS
 from .aloha_inference_runner import AlohaInferenceRunner, resample_remaining
+
+overwatch = initialize_overwatch(__name__)
 
 
 @RUNNERS.register_module()
@@ -38,6 +41,28 @@ class AlohaRTCInferenceRunner(AlohaInferenceRunner):
     def __init__(self, rtc_config: dict = None, *args, **kwargs):
         self.rtc_config = rtc_config
         super().__init__(*args, **kwargs)
+
+    def run(self,
+            initial_instruction:
+            str = 'place it in the brown paper bag with right arm'):
+        """Run inference loop with mode selected by RTC config.
+
+        If RTC guidance uses VJP, run under no_grad and let guidance internals
+        enable gradients only where needed; otherwise use inference_mode.
+        """
+        import rospy
+
+        overwatch.info('Starting inference runner')
+
+        use_vjp = (
+            self.rtc_config and self.rtc_config.get('enabled', False)
+            and self.rtc_config.get('method', 'prefix') == 'guidance'
+            and self.rtc_config.get('use_vjp', False))
+        mode_context = torch.no_grad if use_vjp else torch.inference_mode
+
+        with mode_context():
+            while not rospy.is_shutdown():
+                self._run_episode(initial_instruction)
 
     def _predict_action(self, inputs):
         """Predict with RTC prefix conditioning.
