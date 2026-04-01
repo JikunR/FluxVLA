@@ -3,15 +3,19 @@ import math
 import torch
 
 from fluxvla.engines import VLAS
-from fluxvla.ops.atomic_ops import AttnMultiKey  # noqa: E128
-from fluxvla.ops.atomic_ops import (
-    adarms_norm_style_proj, conv2d_embed_res, layer_norm_matmul_bias,
-    layer_norm_matmul_bias_gelu, layer_norm_QKV_matmul_bias, matmul_attn_v,
-    matmul_bias_res, matmul_bias_silu, matmul_bias_small, matmul_gate,
-    matmul_qkv_rope, matmul_res, matmul_res_gate, matmul_split_k_bias_res,
-    rms_matmul_gate, rms_matmul_qkv_rope)
+# yapf: disable
+from fluxvla.ops.atomic_ops import (AttnMultiKey, adarms_norm_style_proj,
+                                    conv2d_embed_res, layer_norm_matmul_bias,
+                                    layer_norm_matmul_bias_gelu,
+                                    layer_norm_QKV_matmul_bias, matmul_attn_v,
+                                    matmul_bias_res, matmul_bias_silu,
+                                    matmul_bias_small, matmul_gate,
+                                    matmul_qkv_rope, matmul_res,
+                                    matmul_res_gate, matmul_split_k_bias_res,
+                                    rms_matmul_gate, rms_matmul_qkv_rope)
 from fluxvla.ops.triton.attention_triton_ops import (
     matmul_abT_scale, softmax_kernel_masklen, softmax_kernel_prefix_suffix)
+# yapf: enable
 from .pi05_flowmatching import PI05FlowMatching
 
 
@@ -641,7 +645,8 @@ class PI05FlowMatchingInference(PI05FlowMatching):
         self._num_kv_heads = enc_cfg.num_attention_heads
         self._action_dim = self.max_action_dim
 
-        self._encoder_seq_len = num_views * self._vit_num_patches + max_prompt_len
+        self._encoder_seq_len = (
+            num_views * self._vit_num_patches + max_prompt_len)
         self._decoder_seq_len = chunk_size
 
         self._init_buffers()

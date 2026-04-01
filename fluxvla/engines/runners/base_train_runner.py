@@ -21,6 +21,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.distributed as dist
+from safetensors.torch import save_file
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -390,6 +391,23 @@ class BaseTrainRunner(ABC):
             # If dataset has a finite length, use it
             return math.ceil(dataset_len / self.global_batch_size)
 
+    @staticmethod
+    def _save_model_safetensors(model_state_dicts, safetensors_path):
+        """Save model weights as safetensors alongside the .pt checkpoint.
+
+        Handles both flat state dicts and nested dicts (FSDP with
+        change_key_name) by flattening to a single-level {str: tensor} dict.
+        """
+        flat_dict = {}
+        for key, value in model_state_dicts.items():
+            if isinstance(value, dict):
+                for sub_key, tensor in value.items():
+                    flat_dict[f'{key}.{sub_key}'] = tensor
+            elif isinstance(value, torch.Tensor):
+                flat_dict[key] = value
+        if flat_dict:
+            save_file(flat_dict, safetensors_path)
+
     def _cleanup_old_checkpoints(self, checkpoint_dir: str):
         """Clean up old checkpoint files, keeping only the most recent ones."""
         ckpt_files = sorted(
@@ -403,6 +421,11 @@ class BaseTrainRunner(ABC):
                 try:
                     os.remove(os.path.join(checkpoint_dir, old_ckpt))
                     overwatch.info(f'Removed old checkpoint: {old_ckpt}')
+                    sf_file = old_ckpt.replace('.pt', '.safetensors')
+                    sf_path = os.path.join(checkpoint_dir, sf_file)
+                    if os.path.exists(sf_path):
+                        os.remove(sf_path)
+                        overwatch.info(f'Removed old safetensors: {sf_file}')
                 except Exception as e:
                     overwatch.warning(
                         f'Failed to remove checkpoint {old_ckpt}: {e}')

@@ -263,6 +263,7 @@ huggingface-cli download limxdynamics/FluxVLAEngine --include "pi05_paligemma_li
 - Support both FSDP and DDP, support lora training mode.
 - Support Parquet datasets and enable the loading of data in the LeRobot format.
 - Support resuming training from checkpoints.
+- Support safetensors format for model weights.
 - Support [RTC (Real-Time Chunking)](docs/rtc.md) for improved cross-chunk trajectory continuity.
 - Support accelerated inference for Gr00t and PI0.5; See [Inference Acceleration](docs/inference_acceleration.md) for details on Triton fused kernels, CUDA Graph capture and CUDA custom operators.
 
@@ -291,7 +292,7 @@ For example:
 
 ```
 export WANDB_MODE=disabled
-/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/eval.py --config configs/gr00t/gr00t_eagle_3b_libero_10_full_finetune.py --ckpt-path checkpoints/gr00t_eagle_3b_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0577.pt
+/root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/eval.py --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py --ckpt-path checkpoints/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.safetensors
 ```
 
 ### Train on cluster
@@ -312,7 +313,7 @@ export WANDB_MODE=disabled
 /root/miniconda3/envs/fluxvla/bin/torchrun --standalone --nnodes 1 --nproc-per-node 2 scripts/train.py \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --work-dir ./work_dirs/pi05_paligemma_libero_10_full_finetune \
-  --resume-from ./work_dirs/pi05_paligemma_libero_10_full_finetune/checkpoints/checkpoint_epoch_5.pth \
+  --resume-from ./work_dirs/pi05_paligemma_libero_10_full_finetune/checkpoints/checkpoint_epoch_5.pt \
   --cfg-options train_dataloader.per_device_batch_size=2
 ```
 

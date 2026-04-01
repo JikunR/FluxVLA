@@ -104,7 +104,6 @@ def train(args, cfg):
         tokenizer = dataset.batch_transform.base_tokenizer
         tokenizer.save_pretrained(args.work_dir)
         overwatch.info(f'Saved tokenizer to {args.work_dir}')
-    overwatch.info('OpenVLA Training :: Warming Up')
     if hasattr(cfg.runner, 'metric'):
         cfg.runner.metric.run_dir = args.work_dir
     cfg.runner.cfg = cfg

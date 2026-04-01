@@ -248,6 +248,14 @@ class FSDPTrainRunner(BaseTrainRunner):
 
                 # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
                 torch.save(checkpoint_dict, checkpoint_path)
+
+                # Save model weights as safetensors for fast loading
+                safetensors_path = checkpoint_path.replace(
+                    '.pt', '.safetensors')
+                self._save_model_safetensors(model_state_dicts,
+                                             safetensors_path)
+                overwatch.info(f'Saved safetensors at: {safetensors_path}')
+
                 # Create symlink to latest checkpoint
                 latest_ckpt_link = os.path.join(checkpoint_dir,
                                                 'latest-checkpoint.pt')
@@ -255,6 +263,13 @@ class FSDPTrainRunner(BaseTrainRunner):
                         latest_ckpt_link):
                     os.remove(latest_ckpt_link)
                 os.symlink(os.path.abspath(checkpoint_path), latest_ckpt_link)
+
+                latest_sf_link = os.path.join(checkpoint_dir,
+                                              'latest-checkpoint.safetensors')
+                if os.path.islink(latest_sf_link) or os.path.exists(
+                        latest_sf_link):
+                    os.remove(latest_sf_link)
+                os.symlink(os.path.abspath(safetensors_path), latest_sf_link)
 
                 self._cleanup_old_checkpoints(checkpoint_dir)
 

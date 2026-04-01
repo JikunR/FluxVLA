@@ -22,6 +22,7 @@ from typing import Dict
 import torch
 import torch.distributed as dist
 import tqdm
+from safetensors.torch import load_file
 
 from fluxvla.engines.utils import initialize_overwatch
 from fluxvla.engines.utils.eval_utils import (get_libero_dummy_action,
@@ -91,13 +92,15 @@ class LiberoEvalRunner:
         if ckpt_path is not None:
             assert Path.exists(Path(ckpt_path)), \
                 f'Checkpoint path {ckpt_path} does not exist!'
-            checkpoint = torch.load(ckpt_path, map_location='cpu')
-            # Handle both dict format {'model': state_dict}
-            # and direct state_dict
-            if isinstance(checkpoint, dict) and 'model' in checkpoint:
-                state_dict = checkpoint['model']
+
+            if ckpt_path.endswith('.safetensors'):
+                state_dict = load_file(ckpt_path, device='cpu')
             else:
-                state_dict = checkpoint
+                checkpoint = torch.load(ckpt_path, map_location='cpu')
+                if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                    state_dict = checkpoint['model']
+                else:
+                    state_dict = checkpoint
             self.vla.load_state_dict(state_dict, strict=True)
         self.cfg = cfg
         self.seed = seed

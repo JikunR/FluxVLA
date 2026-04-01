@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 import cv2
 import numpy as np
 import torch
+from safetensors.torch import load_file
 
 from fluxvla.engines.utils.torch_utils import set_seed_everywhere
 from ..utils import build_operator_from_cfg, initialize_overwatch
@@ -123,13 +124,14 @@ class BaseInferenceRunner:
         if ckpt_path is not None:
             assert Path.exists(Path(ckpt_path)), \
                 f'Checkpoint path {ckpt_path} does not exist!'
-            checkpoint = torch.load(ckpt_path, map_location='cpu')
-            # Handle both dict format {'model': state_dict}
-            # and direct state_dict
-            if isinstance(checkpoint, dict) and 'model' in checkpoint:
-                state_dict = checkpoint['model']
+            if ckpt_path.endswith('.safetensors'):
+                state_dict = load_file(ckpt_path, device='cpu')
             else:
-                state_dict = checkpoint
+                checkpoint = torch.load(ckpt_path, map_location='cpu')
+                if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                    state_dict = checkpoint['model']
+                else:
+                    state_dict = checkpoint
             self.vla.load_state_dict(state_dict, strict=True)
 
         # Store configuration parameters

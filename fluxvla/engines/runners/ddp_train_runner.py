@@ -368,6 +368,11 @@ class DDPTrainRunner(BaseTrainRunner):
             torch.save(checkpoint_dict, checkpoint_path)
             overwatch.info(f'Saved Checkpoint at: {checkpoint_path}')
 
+            # Save model weights as safetensors for fast loading
+            safetensors_path = checkpoint_path.replace('.pt', '.safetensors')
+            self._save_model_safetensors(model_state_dict, safetensors_path)
+            overwatch.info(f'Saved safetensors at: {safetensors_path}')
+
             # Create/update latest checkpoint symlink
             latest_ckpt_link = os.path.join(checkpoint_dir,
                                             'latest-checkpoint.pt')
@@ -375,6 +380,13 @@ class DDPTrainRunner(BaseTrainRunner):
                     latest_ckpt_link):
                 os.unlink(latest_ckpt_link)
             os.symlink(os.path.basename(checkpoint_path), latest_ckpt_link)
+
+            latest_sf_link = os.path.join(checkpoint_dir,
+                                          'latest-checkpoint.safetensors')
+            if os.path.exists(latest_sf_link) or os.path.islink(
+                    latest_sf_link):
+                os.unlink(latest_sf_link)
+            os.symlink(os.path.basename(safetensors_path), latest_sf_link)
 
             # Clean up old checkpoints
             self._cleanup_old_checkpoints(checkpoint_dir)
