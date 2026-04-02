@@ -58,7 +58,6 @@ class EagleBackbone(nn.Module):
         super().__init__()
 
         config = AutoConfig.from_pretrained(vlm_path, trust_remote_code=True)
-
         # Reduce the number of layers in config BEFORE model creation
         # to avoid initializing layers that will be discarded
         if hasattr(config, 'text_config') and hasattr(config.text_config,
@@ -207,6 +206,9 @@ class EagleInferenceBackbone(nn.Module):
         super().__init__()
 
         config = AutoConfig.from_pretrained(vlm_path, trust_remote_code=True)
+        config.max_input_seq_len = (
+            vlm_config['max_input_seq_len'] if vlm_config is not None
+            and 'max_input_seq_len' in vlm_config else 600)
 
         # Reduce the number of layers in config BEFORE model creation
         # to avoid initializing layers that will be discarded

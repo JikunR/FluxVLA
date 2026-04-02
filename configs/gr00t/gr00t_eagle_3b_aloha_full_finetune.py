@@ -19,7 +19,8 @@ model = dict(
     vlm_backbone=dict(
         type='EagleBackbone',
         vlm_path=  # noqa: E251
-        'fluxvla/models/third_party_models/eagle2_hg_model'),
+        'fluxvla/models/third_party_models/eagle2_hg_model',
+        vlm_config=dict(max_input_seq_len=900)),
     vla_head=dict(
         type='FlowMatchingHead',
         state_dim=64,
@@ -44,12 +45,12 @@ inference_model = dict(
     pretrained_name_or_path=  # noqa: E251
     './checkpoints/GR00T-N1.5-3B',
     vlm_backbone=dict(
-        type='EagleBackbone',
-        dtype=None,
+        type='EagleInferenceBackbone',
         vlm_path=  # noqa: E251
-        'fluxvla/models/third_party_models/eagle2_hg_model'),
+        'fluxvla/models/third_party_models/eagle2_hg_model',
+        vlm_config=dict(max_input_seq_len=900)),
     vla_head=dict(
-        type='FlowMatchingHead',
+        type='FlowMatchingInferenceHead',
         state_dim=64,
         hidden_size=1024,
         input_embedding_dim=1536,
@@ -59,13 +60,19 @@ inference_model = dict(
         num_inference_timesteps=4,
         traj_length=10,
         ori_action_dim=14,
-        action_dim=32),
-    freeze_vlm_backbone=False,
-    name_mapping={
-        'vlm_backbone.vlm': 'backbone.eagle_model',
-        'vla_head': 'action_head'
-    },
-    freeze_projector=False)
+        action_dim=32,
+        max_input_seq_len=900,
+        diffusion_model_cfg=dict(
+            attention_head_dim=48,
+            cross_attention_dim=2048,
+            dropout=0.2,
+            final_dropout=True,
+            interleave_self_attention=True,
+            norm_type='ada_norm',
+            num_attention_heads=32,
+            num_layers=16,
+            output_dim=1024,
+            positional_embeddings=None)))
 
 train_dataloader = dict(
     per_device_batch_size=8,
