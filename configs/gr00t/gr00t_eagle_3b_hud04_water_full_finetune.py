@@ -39,6 +39,34 @@ model = dict(
     },
     freeze_projector=False)
 
+# Inference uses the same model (no acceleration optimizations)
+inference_model = dict(
+    type='LlavaVLA',
+    pretrained_name_or_path=  # noqa: E251
+    './checkpoints/GR00T-N1.5-3B',
+    vlm_backbone=dict(
+        type='EagleBackbone',
+        vlm_path=  # noqa: E251
+        'fluxvla/models/third_party_models/eagle2_hg_model',
+        vlm_config=dict(max_input_seq_len=600)),
+    vla_head=dict(
+        type='FlowMatchingHead',
+        state_dim=64,
+        hidden_size=1024,
+        input_embedding_dim=1536,
+        num_layers=1,
+        num_heads=4,
+        num_inference_timesteps=4,
+        traj_length=10,
+        action_dim=64,
+        ori_action_dim=41),
+    freeze_vlm_backbone=False,
+    name_mapping={
+        'vlm_backbone.vlm': 'backbone.eagle_model',
+        'vla_head': 'action_head'
+    },
+    freeze_projector=False)
+
 train_dataloader = dict(
     per_device_batch_size=8,
     per_device_num_workers=4,
@@ -93,7 +121,7 @@ train_dataloader = dict(
                     action_dim=64,
                     state_key='proprio',
                     action_key='action',
-                    norm_type='mean_std')
+                    norm_type='min_max')
             ],
             action_window_size=10,
             action_key='action',
@@ -133,3 +161,58 @@ runner = dict(
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
     change_key_name=False)
+
+inference = dict(
+    type='Teleop02InferenceRunner',
+    seed=7,
+    task_descriptions={
+        '1': 'Walk to the table ahead, pick up the water bottle with the left hand and place it into the basket on the right side.',
+    },
+    mixed_precision_dtype='bf16',
+    state_dim=33,
+    action_chunk=10,
+    publish_rate=30,
+    camera_names=['head'],
+    dataset=dict(
+        type='PrivateInferenceDataset',
+        embodiment_id=0,
+        img_keys=['head'],
+        num_padding_imgs=1,
+        transforms=[
+            dict(
+                type='ProcessPromptsWithImage',
+                max_len=600,
+                num_images=2,
+                tokenizer=dict(
+                    type='PretrainedTokenizer',
+                    model_path=  # noqa: E251
+                    'fluxvla/models/third_party_models/eagle2_hg_model',
+                )),
+            dict(type='ResizeImages', height=224, width=224),
+            dict(
+                type='NormalizeImages',
+                means=[[123.515625, 116.04492188, 103.59375],
+                       [123.515625, 116.04492188, 103.59375]],
+                stds=[[58.27148438, 57.02636719, 57.27539062],
+                      [58.27148438, 57.02636719, 57.27539062]],
+            ),
+            dict(
+                type='NormalizeStatesAndActions',
+                state_dim=64,
+                state_key='proprio',
+                action_key='action',
+                norm_type='min_max')
+        ]),
+    denormalize_action=dict(
+        type='DenormalizePrivateAction',
+        norm_type='min_max',
+        action_dim=41),
+    operator=dict(
+        type='Teleop02Operator',
+        head_rgb_topic='/head/color/image_raw/compressed',
+        joint_state_topic='/joint/state',
+        finger_state_topic='/brainco1/hand/state',
+        finger_cmd_topic='/brainco1/hand/cmd',
+        teleop_cmd_topic='/teleop_cmd',
+        cmd_vel_topic='/sdk_cmd_vel',
+    ))

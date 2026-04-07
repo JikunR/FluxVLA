@@ -13,4 +13,5 @@
 # limitations under the License.
 
 from .aloha_operator import AlohaOperator  # noqa: F401, F403
+from .teleop02_operator import Teleop02Operator  # noqa: F401, F403
 from .ur_operator import UROperator  # noqa: F401, F403

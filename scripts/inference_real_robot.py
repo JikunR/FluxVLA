@@ -13,6 +13,22 @@
 # limitations under the License.
 
 import argparse
+import inspect
+import sys
+
+# Workaround for PyTorch 2.6 + Python 3.10 inspect.getsourcefile crash
+# when non-standard frames (e.g. from mros C extensions) are on the stack.
+_original_getsourcefile = inspect.getsourcefile
+
+
+def _safe_getsourcefile(obj):
+    try:
+        return _original_getsourcefile(obj)
+    except TypeError:
+        return None
+
+
+inspect.getsourcefile = _safe_getsourcefile
 
 from mmengine import Config
 

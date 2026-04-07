@@ -350,7 +350,8 @@ class PrivateInferenceDataset:
                  resize_size: int = 224,
                  max_len: int = 180,
                  use_quantiles=True,
-                 embodiment_id: int = None) -> None:
+                 embodiment_id: int = None,
+                 num_padding_imgs: int = 0) -> None:
         from fluxvla.engines import build_transform_from_cfg
         self.transforms = list()
         for transform in transforms:
@@ -367,6 +368,7 @@ class PrivateInferenceDataset:
         self.max_len = max_len
         self.use_quantiles = use_quantiles
         self.embodiment_id = embodiment_id
+        self.num_padding_imgs = num_padding_imgs
 
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Process the observation for evaluation."""
@@ -375,6 +377,9 @@ class PrivateInferenceDataset:
             if img_key not in data:
                 raise KeyError(f'Image key `{img_key}` not found in inputs!')
             imgs.append(data[img_key].transpose(2, 0, 1))  # HWC to CHW
+        # Add zero-filled padding images to match training layout
+        for _ in range(self.num_padding_imgs):
+            imgs.append(np.zeros_like(imgs[0]))
         inputs = dict(
             images=imgs,
             task_description=data.get('task_description',
@@ -384,11 +389,12 @@ class PrivateInferenceDataset:
         for transform in self.transforms:
             inputs = transform(inputs)
 
+        num_real = len(self.img_keys)
+        img_mask = [True] * num_real + [False] * self.num_padding_imgs
         batch = dict(
             images=torch.from_numpy(
                 inputs['images']).unsqueeze(0).cuda(),  # noqa: E501
-            img_masks=torch.tensor([[True for _ in range(len(self.img_keys))]
-                                    ]).cuda(),  # noqa: E501
+            img_masks=torch.tensor([img_mask]).cuda(),  # noqa: E501
             lang_tokens=torch.from_numpy(
                 inputs['lang_tokens']).unsqueeze(0).cuda(),
             lang_masks=torch.from_numpy(
