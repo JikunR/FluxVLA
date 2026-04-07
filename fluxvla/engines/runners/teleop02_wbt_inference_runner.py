@@ -1,0 +1,190 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import signal
+import time
+from collections import deque
+from types import SimpleNamespace
+from typing import Dict, List
+
+import numpy as np
+import torch
+
+from ..utils.root import RUNNERS
+from .base_inference_runner import BaseInferenceRunner
+
+
+@RUNNERS.register_module()
+class Teleop02WbtInferenceRunner(BaseInferenceRunner):
+    """Runner for Teleop02 WBT (whole-body tracking) loco-mani inference.
+
+    Uses mros middleware instead of rospy. Sends joint-level commands
+    plus base_link pose via /teleop_cmd_WBT, matching the WBT action
+    space (42-dim).
+
+    The robot has:
+        - 1 head camera
+        - 33-dim state (31 joints + 2 hand_closed)
+        - 42-dim action (31 joint q + 9 base_pose + 2 hand_closed)
+    """
+
+    def __init__(self, *args, **kwargs):
+        if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
+            kwargs['camera_names'] = ['head']
+
+        if 'operator' not in kwargs or kwargs['operator'] is None:
+            kwargs['operator'] = {
+                'type': 'Teleop02WbtOperator',
+                'head_rgb_topic': '/head/color/image_raw/compressed',
+                'joint_state_topic': '/joint/state',
+                'finger_state_topic': '/brainco1/hand/state',
+                'finger_cmd_topic': '/brainco1/hand/cmd',
+                'teleop_wbt_topic': '/teleop_cmd_WBT',
+                'cmd_vel_topic': '/sdk_cmd_vel_vla',
+            }
+
+        if 'task_descriptions' not in kwargs or \
+                kwargs['task_descriptions'] is None:
+            kwargs['task_descriptions'] = {
+                '1': 'pour water into the cup',
+            }
+
+        super().__init__(*args, **kwargs)
+
+        self._running = True
+        self._dt = 1.0 / self.publish_rate
+
+        # Register signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle SIGINT for graceful shutdown."""
+        print('\nShutdown requested...')
+        self._running = False
+
+    def run(self, initial_instruction='pour water into the cup'):
+        """Main inference loop using time-based rate control.
+
+        Replaces rospy-based loop with pure Python time.sleep.
+
+        Args:
+            initial_instruction (str): Default task instruction.
+        """
+        from ..utils import initialize_overwatch
+
+        overwatch = initialize_overwatch(__name__)
+        overwatch.info('Starting Teleop02 WBT inference runner')
+
+        with torch.inference_mode():
+            while self._running:
+                self._run_episode(initial_instruction)
+
+    def _run_episode(self, default_instruction):
+        """Run a single episode without rospy dependency.
+
+        Args:
+            default_instruction (str): Default task instruction.
+        """
+        t = 0
+
+        while t < self.max_publish_step and self._running:
+            instructions = self._get_user_task_instruction(
+                default_instruction)
+            self._prev_ctx = None
+            for instruction in instructions:
+                if not self._running:
+                    break
+                self._action_ctx = SimpleNamespace()
+                self._action_ctx.instruction = instruction
+                inputs = self._preprocess(instruction)
+
+                with torch.autocast(
+                        'cuda',
+                        dtype=self.mixed_precision_dtype,
+                        enabled=self.enable_mixed_precision):
+                    raw_action = self._predict_action(inputs)
+
+                actions = self._postprocess_actions(raw_action)
+                self._execute_actions(actions, None)
+
+                self._prev_ctx = self._action_ctx
+                t += self.action_chunk
+                print(f'Published Step {t}')
+
+    def get_ros_observation(self):
+        """Get observation from Teleop02WbtOperator via mros.
+
+        Polls operator.get_frame() until data is available.
+
+        Returns:
+            tuple: (head_img_rgb, state_33d)
+        """
+        while self._running:
+            result = self.ros_operator.get_frame()
+            if result is not False:
+                return result
+            time.sleep(0.01)
+        return None
+
+    def update_observation_window(self) -> Dict:
+        """Update observation window with latest sensor data.
+
+        Returns:
+            Dict: Latest observation with 'qpos' (33d) and 'head' image.
+        """
+        if self.observation_window is None:
+            self.observation_window = deque(maxlen=2)
+            dummy_obs = {'qpos': None}
+            for camera_name in self.camera_names:
+                dummy_obs[camera_name] = None
+            self.observation_window.append(dummy_obs)
+
+        result = self.get_ros_observation()
+        if result is None:
+            return self.observation_window[-1]
+
+        head_img, state = result
+
+        observation = {
+            'qpos': state,
+            self.camera_names[0]: head_img,  # 'head'
+        }
+
+        self.observation_window.append(observation)
+        return self.observation_window[-1]
+
+    def _execute_actions(self, actions: np.ndarray, rate):
+        """Execute actions by sending each step to the operator.
+
+        Uses time.sleep for rate control instead of rospy.Rate.
+
+        Args:
+            actions (np.ndarray): Array of denormalized 42-dim actions.
+            rate: Unused (kept for interface compatibility).
+        """
+        for action in actions:
+            if not self._running:
+                break
+            self.ros_operator.send_action(action)
+            time.sleep(self._dt)
+
+    def _move_to_prepare_pose(self):
+        """No-op for Teleop02 WBT (teleop-controlled robot)."""
+        pass
+
+    def cleanup(self):
+        """Clean up resources."""
+        print('Cleaning up Teleop02WbtInferenceRunner')
+        self._running = False
+        super().cleanup()

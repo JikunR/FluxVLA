@@ -276,7 +276,8 @@ class DenormalizePrivateAction(DenormalizeLiberoAction):
                  denorm_action: bool = True,
                  normalize_gripper_action: bool = True,
                  invert_gripper_action: bool = True,
-                 action_norm_mask: List[bool] = None):
+                 action_norm_mask: List[bool] = None,
+                 statistic_name: str = 'private'):
         if isinstance(norm_stats, str):
             with open(norm_stats, 'r', encoding='utf-8') as f:
                 self.norm_stats = json.load(f)
@@ -287,6 +288,7 @@ class DenormalizePrivateAction(DenormalizeLiberoAction):
         self.strict = strict
         self.denorm_action = denorm_action
         self.action_norm_mask = action_norm_mask
+        self.statistic_name = statistic_name
 
     def __call__(self, data: Dict) -> Dict:
         """Denormalize the data using the provided statistics.
@@ -301,7 +303,7 @@ class DenormalizePrivateAction(DenormalizeLiberoAction):
                 contain keys that match the keys in `norm_stats`.
         """
         if self.norm_stats is not None and self.denorm_action:
-            norm_stats = self.norm_stats['private']
+            norm_stats = self.norm_stats[self.statistic_name]
             action = data.get('action', None)[0]
             assert action is not None, \
                 f'Action is not found in the data: {data.keys()}'

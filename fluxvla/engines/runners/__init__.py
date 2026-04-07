@@ -17,6 +17,8 @@ from .aloha_rtc_inference_runner import \
     AlohaRTCInferenceRunner  # noqa: F401, F403
 from .teleop02_inference_runner import \
     Teleop02InferenceRunner  # noqa: F401, F403
+from .teleop02_wbt_inference_runner import \
+    Teleop02WbtInferenceRunner  # noqa: F401, F403
 from .base_train_runner import BaseTrainRunner  # noqa: F401, F403
 from .ddp_train_runner import DDPTrainRunner  # noqa: F401, F403
 from .fsdp_train_runner import FSDPTrainRunner  # noqa: F401, F403

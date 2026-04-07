@@ -351,7 +351,8 @@ class PrivateInferenceDataset:
                  max_len: int = 180,
                  use_quantiles=True,
                  embodiment_id: int = None,
-                 num_padding_imgs: int = 0) -> None:
+                 num_padding_imgs: int = 0,
+                 statistic_name: str = 'private') -> None:
         from fluxvla.engines import build_transform_from_cfg
         self.transforms = list()
         for transform in transforms:
@@ -369,6 +370,7 @@ class PrivateInferenceDataset:
         self.use_quantiles = use_quantiles
         self.embodiment_id = embodiment_id
         self.num_padding_imgs = num_padding_imgs
+        self.statistic_name = statistic_name
 
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Process the observation for evaluation."""
@@ -384,7 +386,7 @@ class PrivateInferenceDataset:
             images=imgs,
             task_description=data.get('task_description',
                                       'No task description provided'),
-            stats=self.norm_stats['private'],
+            stats=self.norm_stats[self.statistic_name],
             states=data['qpos'])
         for transform in self.transforms:
             inputs = transform(inputs)
