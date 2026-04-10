@@ -29,7 +29,7 @@ model = dict(
         num_layers=1,
         num_heads=4,
         num_inference_timesteps=4,
-        traj_length=10,
+        traj_length=50,
         action_dim=64,
         ori_action_dim=41),
     freeze_vlm_backbone=False,
@@ -68,8 +68,8 @@ inference_model = dict(
     freeze_projector=False)
 
 train_dataloader = dict(
-    per_device_batch_size=8,
-    per_device_num_workers=4,
+    per_device_batch_size=32,
+    per_device_num_workers=8,
     dataset=dict(
         type='DistributedRepeatingDataset',
         name_mappings={
@@ -81,7 +81,7 @@ train_dataloader = dict(
         datasets=dict(
             type='ParquetDataset',
             data_root_path=  # noqa: E251
-            '/home/jace/code/VLA/dataset/real/loco-mani/water/processed/teleop_0331_0401_vla',  # noqa: E501
+            '/home/jace/dataset/real/loco-mani/wbt_water/loco_mani_wbt_water_0404_relative',  # noqa: E501
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -123,7 +123,7 @@ train_dataloader = dict(
                     action_key='action',
                     norm_type='min_max')
             ],
-            action_window_size=10,
+            action_window_size=50,
             action_key='action',
             use_delta=False,
             statistic_name='hud04_water',
@@ -131,7 +131,7 @@ train_dataloader = dict(
 
 runner = dict(
     type='FSDPTrainRunner',
-    max_epochs=18,
+    max_epochs=90,
     learning_rate=2e-5,
     weight_decay=0.0,
     max_grad_norm=1.0,

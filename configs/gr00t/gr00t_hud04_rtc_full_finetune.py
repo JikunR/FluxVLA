@@ -32,7 +32,13 @@ model = dict(
         num_steps=32,
         traj_length=10, # no use param
         action_dim=64, # from 32 expand to 64
-        ori_action_dim=41),
+        ori_action_dim=41,
+        rtc_training_config=dict(
+            enabled=True,
+            max_delay=7,
+            distribution='exponential',  # 'exponential'（推荐）或 'uniform'
+        )
+        ),
     freeze_vlm_backbone=False,
     name_mapping={
         'vlm_backbone.vlm': 'backbone.eagle_model',
