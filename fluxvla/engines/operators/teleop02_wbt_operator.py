@@ -16,6 +16,7 @@ import time
 
 import cv2
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from fluxvla.engines.utils.root import OPERATORS
 
@@ -59,8 +60,8 @@ DEFAULT_KP = 140.0
 DEFAULT_KD = 4.0
 
 
-def _rot6d_to_quat_xyzw(rot6d):
-    """Convert 6D rotation (Zhou et al.) to quaternion [qx,qy,qz,qw].
+def _rot6d_to_rotation(rot6d):
+    """Convert 6D rotation (Zhou et al.) to scipy Rotation.
 
     Uses numpy Gram-Schmidt, consistent with the data collection
     pipeline in create_wbt_lerobot_dataset.py.
@@ -69,10 +70,8 @@ def _rot6d_to_quat_xyzw(rot6d):
         rot6d (np.ndarray): (6,) array of 6D rotation.
 
     Returns:
-        np.ndarray: (4,) quaternion in [qx, qy, qz, qw] order.
+        Rotation: scipy Rotation object.
     """
-    from scipy.spatial.transform import Rotation
-
     rot6d = np.asarray(rot6d, dtype=np.float64)
     a1, a2 = rot6d[:3], rot6d[3:6]
 
@@ -82,7 +81,12 @@ def _rot6d_to_quat_xyzw(rot6d):
     b3 = np.cross(b1, b2)
 
     mat = np.stack([b1, b2, b3], axis=-2)  # (3, 3)
-    return Rotation.from_matrix(mat).as_quat()  # xyzw
+    return Rotation.from_matrix(mat)
+
+
+def _rot6d_to_quat_xyzw(rot6d):
+    """Convert 6D rotation (Zhou et al.) to quaternion [qx,qy,qz,qw]."""
+    return _rot6d_to_rotation(rot6d).as_quat()
 
 
 @OPERATORS.register_module()
@@ -129,6 +133,10 @@ class Teleop02WbtOperator:
 
         self.last_finger_state = np.zeros(12, dtype=np.float32)
         self.last_finger_cmd = np.zeros(14, dtype=np.float32)
+
+        # Accumulated base pose for delta action integration
+        self._accum_base_pos = np.zeros(3, dtype=np.float64)
+        self._accum_base_rot = Rotation.identity()
 
         self._init_mros()
 
@@ -301,15 +309,20 @@ class Teleop02WbtOperator:
 
         action = np.asarray(action, dtype=np.float64)
 
-        # Parse 42-dim action
+        # Parse 41-dim action (base pose is delta, right_closed fixed)
         joint_cmd_q = action[0:31]
-        base_pos = action[31:34]
-        base_rot6d = action[34:40]
+        delta_base_pos = action[31:34]
+        delta_base_rot6d = action[34:40]
         left_closed = float(action[40])
-        right_closed = float(action[41])
+        right_closed = 1.0
 
-        # Convert base rotation from 6D to quaternion
-        base_quat_xyzw = _rot6d_to_quat_xyzw(base_rot6d)
+        # Accumulate delta base pose onto previous frame
+        self._accum_base_pos += delta_base_pos
+        delta_rot = _rot6d_to_rotation(delta_base_rot6d)
+        self._accum_base_rot = self._accum_base_rot * delta_rot
+
+        base_pos = self._accum_base_pos
+        base_quat_xyzw = self._accum_base_rot.as_quat()
 
         # Construct TeleopMsg
         teleop_msg = TeleopMsg()

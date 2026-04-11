@@ -172,3 +172,52 @@ runner = dict(
     mixed_precision_dtype='bf16',
     change_key_name=False)
 
+inference = dict(
+    type='Teleop02WbtInferenceRunner',
+    seed=7,
+    task_descriptions={
+        '1': 'Walk to the box ahead, bend down to pick up the water bottle from the box, then place it on the table to the left.',
+    },
+    mixed_precision_dtype='bf16',
+    dataset=dict(
+        type='PrivateInferenceDataset',
+        embodiment_id=0,
+        img_keys=['head'],
+        transforms=[
+            dict(
+                type='ProcessPromptsWithImage',
+                max_len=900,
+                num_images=1,
+                tokenizer=dict(type='PretrainedTokenizer'
+                               # special_tokens={'pad_token': '<PAD>'}
+                               )),
+            dict(type='ResizeImages', height=224, width=224),
+            dict(
+                type='NormalizeImages',
+                means=[[123.515625, 116.04492188, 103.59375],
+                       [123.515625, 116.04492188, 103.59375],
+                       [123.515625, 116.04492188, 103.59375]],
+                stds=[[58.27148438, 57.02636719, 57.27539062],
+                      [58.27148438, 57.02636719, 57.27539062],
+                      [58.27148438, 57.02636719, 57.27539062]],
+            ),
+            dict(
+                type='NormalizeStatesAndActions',
+                state_dim=64,
+                state_key='proprio',
+                action_key='action',
+                norm_type='min_max')
+        ]),
+    denormalize_action=dict(
+        type='DenormalizePrivateAction', norm_type='min_max', action_dim=41),
+    operator=dict(
+        type='Teleop02WbtOperator',
+        head_rgb_topic='/head/color/image_raw/compressed',
+        joint_state_topic='/joint/state',
+        finger_state_topic='/brainco1/hand/state',
+        finger_cmd_topic='/brainco1/hand/cmd',
+        teleop_wbt_topic='/teleop_cmd_WBT',
+        cmd_vel_topic='/sdk_cmd_vel_vla',
+    ))
+
+

@@ -156,6 +156,9 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
 
         head_img, state = result
 
+        # Apply JPEG compression to match training conditions
+        head_img = self._apply_jpeg_compression(head_img)
+
         observation = {
             'qpos': state,
             self.camera_names[0]: head_img,  # 'head'
