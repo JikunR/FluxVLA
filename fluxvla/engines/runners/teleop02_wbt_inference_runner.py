@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 from ..utils.root import RUNNERS
+from .aloha_inference_runner import resample_remaining
 from .base_inference_runner import BaseInferenceRunner
 
 
@@ -39,7 +40,14 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         - 42-dim action (31 joint q + 9 base_pose + 2 hand_closed)
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self,
+                 async_execution: bool = False,
+                 execute_horizon: int = None,
+                 *args,
+                 **kwargs):
+        self.async_execution = async_execution
+        self.execute_horizon = execute_horizon
+
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
             kwargs['camera_names'] = ['head']
 
@@ -167,20 +175,43 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         self.observation_window.append(observation)
         return self.observation_window[-1]
 
-    def _execute_actions(self, actions: np.ndarray, rate):
-        """Execute actions by sending each step to the operator.
+    def _predict_action(self, inputs):
+        """Run model inference with timing instrumentation."""
+        self._action_ctx.inference_start = time.time()
+        raw_action = self.vla.predict_action(**inputs)
+        return raw_action
 
-        Uses time.sleep for rate control instead of rospy.Rate.
+    def _execute_actions(self, actions: np.ndarray, rate):
+        """Execute actions (sync or async).
+
+        In async mode, skips steps that elapsed during inference.
 
         Args:
             actions (np.ndarray): Array of denormalized 42-dim actions.
             rate: Unused (kept for interface compatibility).
         """
-        for action in actions:
-            if not self._running:
-                break
-            self.ros_operator.send_action(action)
-            time.sleep(self._dt)
+        if not self._running:
+            return
+
+        ctx = self._action_ctx
+
+        if self.async_execution and self._prev_ctx is not None:
+            ctx.action_timestamp = ctx.inference_start
+            offset = (time.time() - ctx.action_timestamp) / self._dt
+            actions = resample_remaining(actions, offset)
+        else:
+            ctx.action_timestamp = time.time()
+            if self.execute_horizon is not None:
+                actions = actions[:self.execute_horizon]
+
+        self.ros_operator.execute_trajectory(
+            actions,
+            dt=self._dt,
+            async_exec=self.async_execution,
+            running_flag_fn=lambda: self._running)
+
+        if self.async_execution and self.execute_horizon is not None:
+            time.sleep(self.execute_horizon * self._dt)
 
     def _move_to_prepare_pose(self):
         """No-op for Teleop02 WBT (teleop-controlled robot)."""
@@ -190,4 +221,8 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         """Clean up resources."""
         print('Cleaning up Teleop02WbtInferenceRunner')
         self._running = False
+
+        if hasattr(self.ros_operator, 'stop_trajectory'):
+            self.ros_operator.stop_trajectory()
+
         super().cleanup()

@@ -32,7 +32,7 @@ model = dict(
         num_steps=32,
         traj_length=10, # no use param
         action_dim=64, # from 32 expand to 64
-        ori_action_dim=41),
+        ori_action_dim=42),
     freeze_vlm_backbone=False,
     name_mapping={
         'vlm_backbone.vlm': 'backbone.eagle_model',
@@ -59,7 +59,7 @@ inference_model = dict(
         num_steps=32,
         num_inference_timesteps=4,
         traj_length=10,
-        ori_action_dim=41,
+        ori_action_dim=42,
         action_dim=64,
         max_input_seq_len=900,
         diffusion_model_cfg=dict(
@@ -209,7 +209,7 @@ inference = dict(
                 norm_type='min_max')
         ]),
     denormalize_action=dict(
-        type='DenormalizePrivateAction', norm_type='min_max', action_dim=41),
+        type='DenormalizePrivateAction', norm_type='min_max', action_dim=42),
     operator=dict(
         type='Teleop02WbtOperator',
         head_rgb_topic='/head/color/image_raw/compressed',

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import time
 
 import cv2
@@ -137,6 +138,10 @@ class Teleop02WbtOperator:
         # Accumulated base pose for delta action integration
         self._accum_base_pos = np.zeros(3, dtype=np.float64)
         self._accum_base_rot = Rotation.identity()
+
+        # Trajectory thread state for async execution
+        self._traj_thread = None
+        self._traj_stop_event = threading.Event()
 
         self._init_mros()
 
@@ -314,7 +319,7 @@ class Teleop02WbtOperator:
         delta_base_pos = action[31:34]
         delta_base_rot6d = action[34:40]
         left_closed = float(action[40])
-        right_closed = 1.0
+        right_closed = float(action[41])
 
         # Accumulate delta base pose onto previous frame
         self._accum_base_pos += delta_base_pos
@@ -368,3 +373,50 @@ class Teleop02WbtOperator:
         finger_msg = Float32Array()
         finger_msg.data = finger_cmd
         self.finger_publisher.publish(finger_msg)
+
+    def execute_trajectory(self, actions, dt, async_exec=False,
+                           running_flag_fn=None):
+        """Execute a trajectory of 42-dim actions.
+
+        Args:
+            actions (np.ndarray): Trajectory array of shape (N, 42).
+            dt (float): Time step between trajectory points in seconds.
+            async_exec (bool): If True, execute in a background thread.
+            running_flag_fn (callable, optional): Returns bool; checked
+                each step for graceful shutdown.
+        """
+        self.stop_trajectory()
+        if self._traj_thread is not None:
+            self._traj_thread.join(timeout=2.0)
+        self._traj_stop_event = threading.Event()
+
+        if async_exec:
+            self._traj_thread = threading.Thread(
+                target=self._run_trajectory,
+                args=(actions, dt, self._traj_stop_event, running_flag_fn),
+                daemon=True)
+            self._traj_thread.start()
+        else:
+            self._run_trajectory(
+                actions, dt, self._traj_stop_event, running_flag_fn)
+
+    def _run_trajectory(self, actions, dt, stop_event, running_flag_fn):
+        """Execute actions sequentially with rate control.
+
+        Args:
+            actions (np.ndarray): Trajectory array of shape (N, 42).
+            dt (float): Sleep duration between steps.
+            stop_event (threading.Event): Set to abort early.
+            running_flag_fn (callable or None): Checked each step.
+        """
+        for action in actions:
+            if stop_event.is_set():
+                break
+            if running_flag_fn is not None and not running_flag_fn():
+                break
+            self.send_action(action)
+            time.sleep(dt)
+
+    def stop_trajectory(self):
+        """Signal the background trajectory thread to stop."""
+        self._traj_stop_event.set()

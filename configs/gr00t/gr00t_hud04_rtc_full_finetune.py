@@ -32,7 +32,7 @@ model = dict(
         num_steps=32,
         traj_length=10, # no use param
         action_dim=64, # from 32 expand to 64
-        ori_action_dim=41,
+        ori_action_dim=42,
         rtc_training_config=dict(
             enabled=True,
             max_delay=7,
@@ -65,7 +65,7 @@ inference_model = dict(
         num_steps=32,
         num_inference_timesteps=4,
         traj_length=10,
-        ori_action_dim=41,
+        ori_action_dim=42,
         action_dim=64,
         max_input_seq_len=900,
         diffusion_model_cfg=dict(
@@ -177,4 +177,64 @@ runner = dict(
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
     change_key_name=False)
+
+inference = dict(
+    type='Teleop02WbtRTCInferenceRunner',
+    seed=7,
+    async_execution=True,
+    execute_horizon=None,
+    rtc_config=dict(
+        enabled=True,
+        method='prefix',
+        prefix_len=5,
+    ),
+    task_descriptions={
+        '1': 'Walk to the box ahead, bend down to pick up the water bottle from the box, then place it on the table to the left.',
+    },
+    mixed_precision_dtype='bf16',
+    state_dim=33,
+    action_chunk=32,
+    publish_rate=30,
+    camera_names=['head'],
+    dataset=dict(
+        type='PrivateInferenceDataset',
+        embodiment_id=0,
+        img_keys=['head'],
+        transforms=[
+            dict(
+                type='ProcessPromptsWithImage',
+                max_len=900,
+                num_images=1,
+                tokenizer=dict(type='PretrainedTokenizer'
+                               # special_tokens={'pad_token': '<PAD>'}
+                               )),
+            dict(type='ResizeImages', height=224, width=224),
+            dict(
+                type='NormalizeImages',
+                means=[[123.515625, 116.04492188, 103.59375],
+                       [123.515625, 116.04492188, 103.59375],
+                       [123.515625, 116.04492188, 103.59375]],
+                stds=[[58.27148438, 57.02636719, 57.27539062],
+                      [58.27148438, 57.02636719, 57.27539062],
+                      [58.27148438, 57.02636719, 57.27539062]],
+            ),
+            dict(
+                type='NormalizeStatesAndActions',
+                state_dim=64,
+                state_key='proprio',
+                action_key='action',
+                norm_type='min_max')
+        ]),
+    denormalize_action=dict(
+        type='DenormalizePrivateAction', norm_type='min_max', action_dim=42),
+    operator=dict(
+        type='Teleop02WbtOperator',
+        head_rgb_topic='/head/color/image_raw/compressed',
+        joint_state_topic='/joint/state',
+        finger_state_topic='/brainco1/hand/state',
+        finger_cmd_topic='/brainco1/hand/cmd',
+        teleop_wbt_topic='/teleop_cmd_WBT',
+        cmd_vel_topic='/sdk_cmd_vel_vla',
+    ))
+
 
