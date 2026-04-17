@@ -176,7 +176,7 @@ inference = dict(
     type='Teleop02WbtInferenceRunner',
     seed=7,
     task_descriptions={
-        '1': 'Walk to the box ahead, bend down to pick up the water bottle from the box, then place it on the table to the left.',
+        '1': 'Walk to the box ahead, bend down to pick up the water bottle from the box, then turn around and walk to the table, and place the bottle on top of the table.',
     },
     mixed_precision_dtype='bf16',
     dataset=dict(
