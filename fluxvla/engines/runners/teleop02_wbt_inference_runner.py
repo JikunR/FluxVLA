@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import signal
 import time
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List
 
+import cv2
 import numpy as np
 import torch
 
@@ -35,7 +38,7 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
     space (42-dim).
 
     The robot has:
-        - 1 head camera
+        - 1 head camera + 1 left wrist camera
         - 33-dim state (31 joints + 2 hand_closed)
         - 42-dim action (31 joint q + 9 base_pose + 2 hand_closed)
     """
@@ -43,18 +46,24 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
     def __init__(self,
                  async_execution: bool = False,
                  execute_horizon: int = None,
+                 debug_jpeg_dump_dir: str = None,
+                 debug_jpeg_dump_max_frames: int = 10,
                  *args,
                  **kwargs):
         self.async_execution = async_execution
         self.execute_horizon = execute_horizon
+        self.debug_jpeg_dump_dir = debug_jpeg_dump_dir
+        self.debug_jpeg_dump_max_frames = debug_jpeg_dump_max_frames
+        self._debug_jpeg_dump_count = 0
 
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
-            kwargs['camera_names'] = ['head']
+            kwargs['camera_names'] = ['head', 'left_wrist']
 
         if 'operator' not in kwargs or kwargs['operator'] is None:
             kwargs['operator'] = {
                 'type': 'Teleop02WbtOperator',
                 'head_rgb_topic': '/head/color/image_raw/compressed',
+                'left_wrist_rgb_topic': '/left_wrist_camera/color/image_raw/compressed',
                 'joint_state_topic': '/joint/state',
                 'finger_state_topic': '/brainco1/hand/state',
                 'finger_cmd_topic': '/brainco1/hand/cmd',
@@ -213,7 +222,7 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         Polls operator.get_frame() until data is available.
 
         Returns:
-            tuple: (head_img_rgb, state_33d)
+            tuple: (head_img_rgb, left_wrist_img_rgb, state_33d)
         """
         while self._running:
             get_frame_start = time.perf_counter()
@@ -229,11 +238,43 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
             time.sleep(0.01)
         return None
 
+    def _write_debug_jpeg_image(self, path, img):
+        """Write one post-JPEG debug image to disk."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(path, img[:, :, ::-1])
+
+    def _apply_jpeg_compression_rgb(self, img):
+        """Apply base BGR JPEG compression while preserving RGB API."""
+        bgr_img = img[:, :, ::-1]
+        compressed_bgr = self._apply_jpeg_compression(bgr_img)
+        return compressed_bgr[:, :, ::-1].copy()
+
+    def _dump_debug_jpeg_images(self, images):
+        """Save post-JPEG images for visual dataset comparison."""
+        dump_dir = getattr(self, 'debug_jpeg_dump_dir', None)
+        if not dump_dir:
+            return
+
+        dump_count = getattr(self, '_debug_jpeg_dump_count', 0)
+        max_frames = getattr(self, 'debug_jpeg_dump_max_frames', 10)
+        if max_frames is not None and dump_count >= max_frames:
+            return
+
+        for camera_name, image in images.items():
+            if image is None:
+                continue
+            filename = f'frame_{dump_count:06d}_{camera_name}.png'
+            path = os.path.join(dump_dir, filename)
+            self._write_debug_jpeg_image(path, image)
+            print(f'[debug] dumped post-JPEG image: {path}', flush=True)
+
+        self._debug_jpeg_dump_count = dump_count + 1
+
     def update_observation_window(self) -> Dict:
         """Update observation window with latest sensor data.
 
         Returns:
-            Dict: Latest observation with 'qpos' (33d) and 'head' image.
+            Dict: Latest observation with 'qpos' (33d), 'head' image, and 'left_wrist' image.
         """
         if self.observation_window is None:
             window_init_start = time.perf_counter()
@@ -256,11 +297,16 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         if result is None:
             return self.observation_window[-1]
 
-        head_img, state = result
+        head_img, left_wrist_img, state = result
 
         # Apply JPEG compression to match training conditions
         stage_start = time.perf_counter()
-        head_img = self._apply_jpeg_compression(head_img)
+        head_img = self._apply_jpeg_compression_rgb(head_img)
+        left_wrist_img = self._apply_jpeg_compression_rgb(left_wrist_img)
+
+        debug_images = {'head': head_img, 'left_wrist': left_wrist_img}
+
+        self._dump_debug_jpeg_images(debug_images)
         print(
             f'[timing] jpeg_compression='
             f'{(time.perf_counter() - stage_start) * 1000.0:.3f} ms',
@@ -269,6 +315,7 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         observation = {
             'qpos': state,
             self.camera_names[0]: head_img,  # 'head'
+            self.camera_names[1]: left_wrist_img,  # 'left_wrist'
         }
 
         self.observation_window.append(observation)

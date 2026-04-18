@@ -90,6 +90,11 @@ def _rot6d_to_quat_xyzw(rot6d):
     return _rot6d_to_rotation(rot6d).as_quat()
 
 
+def _wrap_to_pi(angle):
+    """Wrap an angle in radians to [-pi, pi)."""
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
 @OPERATORS.register_module()
 class Teleop02WbtOperator:
     """Teleop02 WBT (whole-body tracking) operator using mros middleware.
@@ -100,8 +105,9 @@ class Teleop02WbtOperator:
     The robot has 31 joint positions, 2 hand closed flags (state = 33d),
     and 42-dim actions:
         [0:31]  joint position commands (q)
-        [31:34] base_link position (xyz)
-        [34:40] base_link rotation (rot6d)
+        [31:34] base_link position (delta_x, delta_y, absolute_z)
+        [34:40] base_link rotation as rot6d from ZYX Euler
+                (delta_yaw, absolute_pitch, absolute_roll)
         [40]    left_hand_closed
         [41]    right_hand_closed
     """
@@ -109,6 +115,8 @@ class Teleop02WbtOperator:
     def __init__(
             self,
             head_rgb_topic='/head/color/image_raw/compressed',
+            left_wrist_rgb_topic=(
+                '/left_wrist_camera/color/image_raw/compressed'),
             joint_state_topic='/joint/state',
             finger_state_topic='/brainco1/hand/state',
             finger_cmd_topic='/brainco1/hand/cmd_vla',
@@ -118,6 +126,8 @@ class Teleop02WbtOperator:
 
         Args:
             head_rgb_topic (str): Topic for head camera compressed image.
+            left_wrist_rgb_topic (str): Topic for left wrist camera
+                compressed image.
             joint_state_topic (str): Topic for joint state feedback.
             finger_state_topic (str): Topic for finger state feedback.
             finger_cmd_topic (str): Topic for finger commands.
@@ -126,6 +136,7 @@ class Teleop02WbtOperator:
             cmd_vel_topic (str): Topic for base velocity commands.
         """
         self.head_rgb_topic = head_rgb_topic
+        self.left_wrist_rgb_topic = left_wrist_rgb_topic
         self.joint_state_topic = joint_state_topic
         self.finger_state_topic = finger_state_topic
         self.finger_cmd_topic = finger_cmd_topic
@@ -138,6 +149,7 @@ class Teleop02WbtOperator:
         # Accumulated base pose for delta action integration
         self._accum_base_pos = np.zeros(3, dtype=np.float64)
         self._accum_base_pos[2] = 0.9
+        self._accum_base_yaw = 0.0
         self._accum_base_rot = Rotation.identity()
 
         # Trajectory thread state for async execution
@@ -159,6 +171,8 @@ class Teleop02WbtOperator:
         # Subscribers
         self.color_subscriber = mros.subscribe(
             self.head_rgb_topic, CompressedImage, None)
+        self.left_wrist_color_subscriber = mros.subscribe(
+            self.left_wrist_rgb_topic, CompressedImage, None)
         self.joint_state_subscriber = mros.subscribe(
             self.joint_state_topic, JointState, None)
         self.finger_state_subscriber = mros.subscribe(
@@ -187,38 +201,52 @@ class Teleop02WbtOperator:
             print(f'Failed to decode compressed image: {e}')
             return None
 
+    def _read_compressed_rgb_image(self, subscriber, timeout):
+        """Read a compressed image message and return an RGB image."""
+        msg = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = subscriber.readMsgRT()
+            if msg is not None:
+                break
+            time.sleep(0.005)
+        if msg is None:
+            return None
+
+        image = self._compressed_msg_to_numpy(msg)
+        if image is None:
+            return None
+        return image[:, :, ::-1].copy()
+
     def get_frame(self, timeout=0.05):
         """Get synchronized observation from all sensors.
 
-        Reads head camera image, joint states, and finger states.
+        Reads head camera image, left wrist camera image, joint states, and
+        finger states.
         Returns combined 33-dim state vector (31 joints + 2 hand_closed).
 
         Args:
             timeout (float): Maximum wait time in seconds for each
-                sensor reading. Defaults to 0.5.
+                sensor reading. Defaults to 0.05.
 
         Returns:
             tuple or False: If successful, returns
-                (head_img_rgb, joint_state_33d). If failed, returns False.
+                (head_img_rgb, left_wrist_img_rgb, joint_state_33d). If
+                failed, returns False.
         """
         # (1) Read head image
-        head_rgb = None
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            head_rgb = self.color_subscriber.readMsgRT()
-            if head_rgb is not None:
-                break
-            time.sleep(0.005)
-        if head_rgb is None:
-            return False
-
-        head_img = self._compressed_msg_to_numpy(head_rgb)
+        head_img = self._read_compressed_rgb_image(
+            self.color_subscriber, timeout)
         if head_img is None:
             return False
-        # Convert BGR to RGB
-        head_img = head_img[:, :, ::-1].copy()
 
-        # (2) Read joint state
+        # (2) Read left wrist image
+        left_wrist_img = self._read_compressed_rgb_image(
+            self.left_wrist_color_subscriber, timeout)
+        if left_wrist_img is None:
+            return False
+
+        # (3) Read joint state
         joint_state_msg = None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -236,7 +264,7 @@ class Teleop02WbtOperator:
             return False
         joint_state = joint_state[:31]
 
-        # (3) Read finger state
+        # (4) Read finger state
         finger_state_msg = None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -264,7 +292,7 @@ class Teleop02WbtOperator:
                      dtype=np.float32)
         ])
 
-        return (head_img, state)
+        return (head_img, left_wrist_img, state)
 
     def _make_keypoint(self, name, pos=(0.0, 0.0, 0.0),
                        quat_xyzw=(0.0, 0.0, 0.0, 1.0)):
@@ -296,8 +324,10 @@ class Teleop02WbtOperator:
 
         Action layout:
             [0:31]  joint position commands (q) -> joint_cmd
-            [31:34] base_link position (xyz)    -> anchors[0]
-            [34:40] base_link rotation (rot6d)  -> anchors[0]
+            [31:34] base_link position:
+                    x/y are deltas, z is normalized absolute value
+            [34:40] base_link rotation as rot6d:
+                    yaw is delta, pitch/roll are normalized absolute values
             [40]    left_hand_closed
             [41]    right_hand_closed
 
@@ -315,17 +345,32 @@ class Teleop02WbtOperator:
 
         action = np.asarray(action, dtype=np.float64)
 
-        # Parse 41-dim action (base pose is delta, right_closed fixed)
+        # Parse 42-dim action.
         joint_cmd_q = action[0:31]
-        delta_base_pos = action[31:34]
-        delta_base_rot6d = action[34:40]
+        base_pos_action = action[31:34]
+        base_rot6d_action = action[34:40]
         left_closed = float(action[40])
         right_closed = float(action[41])
 
-        # Accumulate delta base pose onto previous frame
-        self._accum_base_pos += delta_base_pos
-        delta_rot = _rot6d_to_rotation(delta_base_rot6d)
-        self._accum_base_rot = self._accum_base_rot * delta_rot
+        # Hybrid delta semantics from create_wbt_lerobot_dataset.py:
+        # x/y/yaw are frame deltas; z/pitch/roll are absolute normalized pose.
+        self._accum_base_pos[:2] += base_pos_action[:2]
+        self._accum_base_pos[2] = base_pos_action[2]
+
+        if not hasattr(self, '_accum_base_yaw'):
+            self._accum_base_yaw = self._accum_base_rot.as_euler('ZYX')[0]
+
+        base_action_euler = _rot6d_to_rotation(
+            base_rot6d_action).as_euler('ZYX')
+        self._accum_base_yaw = _wrap_to_pi(
+            self._accum_base_yaw + base_action_euler[0])
+        self._accum_base_rot = Rotation.from_euler(
+            'ZYX',
+            [
+                self._accum_base_yaw,
+                base_action_euler[1],
+                base_action_euler[2],
+            ])
 
         base_pos = self._accum_base_pos
         base_quat_xyzw = self._accum_base_rot.as_quat()
@@ -366,9 +411,9 @@ class Teleop02WbtOperator:
         finger_cmd[2] = 100.0
         finger_cmd[3] = 100.0
 
-        # Last 2 dims: force level (use level 3)
-        finger_cmd[12] = 3.0
-        finger_cmd[13] = 3.0
+        # Last 2 dims: force level (use level 1)
+        finger_cmd[12] = 1.0
+        finger_cmd[13] = 1.0
 
         self.last_finger_cmd = np.array(finger_cmd, dtype=np.float32)
         finger_msg = Float32Array()

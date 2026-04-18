@@ -75,7 +75,7 @@ inference_model = dict(
             positional_embeddings=None)))
 
 train_dataloader = dict(
-    per_device_batch_size=32,
+    per_device_batch_size=16,
     per_device_num_workers=8,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -90,7 +90,7 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    '/home/jace/dataset/real/loco-mani/wbt_water/loco_mani_wbt_water_0404_delta',  # noqa: E501
+                    '/home/jace/dataset/real/loco-mani/wbt_water/loco_mani_wbt_water_0413_xyyaw_delta_wrist_camera',  # noqa: E501
                 ],
                 transforms=[
                     dict(
@@ -103,13 +103,14 @@ train_dataloader = dict(
                         ],
                         video_keys=[
                             'observation.images.head',
+                            'observation.images.left_wrist',
                         ],
                         name_mappings={'observation.state': ['states']}),
                     dict(type='ParquetPrompter'),
                     dict(
                         type='ProcessPromptsWithImage',
                         max_len=900,
-                        num_images=1,
+                        num_images=2,
                         tokenizer=dict(
                             type='PretrainedTokenizer',
                             model_path=  # noqa: E251
@@ -175,6 +176,10 @@ runner = dict(
 inference = dict(
     type='Teleop02WbtInferenceRunner',
     seed=7,
+
+    # debug_jpeg_dump_dir='work_dirs/teleop02_wbt_jpeg_debug',
+    # debug_jpeg_dump_max_frames=10,
+
     task_descriptions={
         '1': 'Walk to the box ahead, bend down to pick up the water bottle from the box, then turn around and walk to the table, and place the bottle on top of the table.',
     },
@@ -182,12 +187,12 @@ inference = dict(
     dataset=dict(
         type='PrivateInferenceDataset',
         embodiment_id=0,
-        img_keys=['head'],
+        img_keys=['head', 'left_wrist'],
         transforms=[
             dict(
                 type='ProcessPromptsWithImage',
                 max_len=900,
-                num_images=1,
+                num_images=2,
                 tokenizer=dict(type='PretrainedTokenizer'
                                # special_tokens={'pad_token': '<PAD>'}
                                )),
@@ -213,6 +218,7 @@ inference = dict(
     operator=dict(
         type='Teleop02WbtOperator',
         head_rgb_topic='/head/color/image_raw/compressed',
+        left_wrist_rgb_topic='/left_wrist_camera/color/image_raw/compressed',
         joint_state_topic='/joint/state',
         finger_state_topic='/brainco1/hand/state',
         finger_cmd_topic='/brainco1/hand/cmd',
