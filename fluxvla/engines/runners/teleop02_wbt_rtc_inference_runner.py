@@ -61,6 +61,7 @@ class Teleop02WbtRTCInferenceRunner(Teleop02WbtInferenceRunner):
         mode_context = torch.no_grad if use_vjp else torch.inference_mode
 
         with mode_context():
+            self._warmup_model(initial_instruction)
             while self._running:
                 self._run_episode(initial_instruction)
 
@@ -85,6 +86,7 @@ class Teleop02WbtRTCInferenceRunner(Teleop02WbtInferenceRunner):
             if prefix_len is None:
                 prefix_len = int(prev.inference_elapsed * self.publish_rate)
             prefix_len = min(prefix_len, remaining.shape[1])
+            print(f"prefix_len: {prefix_len}, remaining.shape[1]: {remaining.shape[1]}")
             if prefix_len > 0:
                 inputs['prev_actions'] = torch.from_numpy(remaining).to(
                     device=inputs['states'].device,
@@ -95,5 +97,8 @@ class Teleop02WbtRTCInferenceRunner(Teleop02WbtInferenceRunner):
         raw_action = self.vla.predict_action(**inputs)
 
         ctx.inference_elapsed = time.time() - ctx.inference_start
+        print(f'Inference time: {ctx.inference_elapsed:.3f}s')
+        test_prefix_len = int(ctx.inference_elapsed * self.publish_rate)
+        print(f'Using prefix_len={inputs.get("prefix_len", "N/A")} (test estimate: {test_prefix_len})')
         ctx.raw_actions = raw_action.cpu().numpy()
         return raw_action
