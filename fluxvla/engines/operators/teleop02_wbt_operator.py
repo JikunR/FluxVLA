@@ -105,7 +105,7 @@ class Teleop02WbtOperator:
     The robot has 31 joint positions, 2 hand closed flags (state = 33d),
     and 42-dim actions:
         [0:31]  joint position commands (q)
-        [31:34] base_link position (delta_x, delta_y, absolute_z)
+        [31:34] base_link position (body-frame delta_x/delta_y, absolute_z)
         [34:40] base_link rotation as rot6d from ZYX Euler
                 (delta_yaw, absolute_pitch, absolute_roll)
         [40]    left_hand_closed
@@ -325,9 +325,11 @@ class Teleop02WbtOperator:
         Action layout:
             [0:31]  joint position commands (q) -> joint_cmd
             [31:34] base_link position:
-                    x/y are deltas, z is normalized absolute value
+                    x/y are body-frame i->i+1 deltas,
+                    z is normalized absolute value
             [34:40] base_link rotation as rot6d:
-                    yaw is delta, pitch/roll are normalized absolute values
+                    yaw is i->i+1 delta,
+                    pitch/roll are normalized absolute values
             [40]    left_hand_closed
             [41]    right_hand_closed
 
@@ -352,13 +354,21 @@ class Teleop02WbtOperator:
         left_closed = float(action[40])
         right_closed = float(action[41])
 
-        # Hybrid delta semantics from create_wbt_lerobot_dataset.py:
-        # x/y/yaw are frame deltas; z/pitch/roll are absolute normalized pose.
-        self._accum_base_pos[:2] += base_pos_action[:2]
-        self._accum_base_pos[2] = base_pos_action[2]
-
         if not hasattr(self, '_accum_base_yaw'):
             self._accum_base_yaw = self._accum_base_rot.as_euler('ZYX')[0]
+
+        # Hybrid delta semantics from create_wbt_lerobot_dataset.py:
+        # x/y/yaw are i -> i+1 frame deltas. x/y are expressed in the
+        # current frame's body frame, so rotate them by current yaw before
+        # integrating into world position. z/pitch/roll are absolute values.
+        cos_yaw = np.cos(self._accum_base_yaw)
+        sin_yaw = np.sin(self._accum_base_yaw)
+        delta_x_body, delta_y_body = base_pos_action[:2]
+        self._accum_base_pos[0] += (
+            cos_yaw * delta_x_body - sin_yaw * delta_y_body)
+        self._accum_base_pos[1] += (
+            sin_yaw * delta_x_body + cos_yaw * delta_y_body)
+        self._accum_base_pos[2] = base_pos_action[2]
 
         base_action_euler = _rot6d_to_rotation(
             base_rot6d_action).as_euler('ZYX')

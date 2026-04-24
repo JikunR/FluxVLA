@@ -199,7 +199,7 @@ class TestTeleop02WbtOperator(unittest.TestCase):
         np.testing.assert_array_equal(state[:31], np.arange(31))
         np.testing.assert_array_equal(state[31:], np.array([0.0, 0.0]))
 
-    def test_send_action_accumulates_xy_yaw_and_keeps_absolute_z_pitch_roll(
+    def test_send_action_rotates_body_frame_xy_deltas_by_current_yaw(
             self):
         _install_fake_mros_messages()
         Teleop02WbtOperator = _load_operator_class()
@@ -211,12 +211,12 @@ class TestTeleop02WbtOperator(unittest.TestCase):
         operator.last_finger_cmd = np.zeros(14, dtype=np.float32)
 
         first_action = np.zeros(42, dtype=np.float64)
-        first_action[31:34] = [1.0, 2.0, 0.7]
-        first_action[34:40] = _rot6d_from_euler_zyx(0.1, 0.2, 0.3)
+        first_action[31:34] = [1.0, 0.0, 0.7]
+        first_action[34:40] = _rot6d_from_euler_zyx(np.pi / 2, 0.2, 0.3)
 
         second_action = np.zeros(42, dtype=np.float64)
-        second_action[31:34] = [0.5, -1.0, 0.8]
-        second_action[34:40] = _rot6d_from_euler_zyx(-0.04, -0.2, 0.1)
+        second_action[31:34] = [1.0, 0.0, 0.8]
+        second_action[34:40] = _rot6d_from_euler_zyx(0.0, -0.2, 0.1)
 
         operator.send_action(first_action)
         operator.send_action(second_action)
@@ -230,14 +230,15 @@ class TestTeleop02WbtOperator(unittest.TestCase):
                 first_anchor.pose.position.y,
                 first_anchor.pose.position.z,
             ],
-            [1.0, 2.0, 0.7])
+            [1.0, 0.0, 0.7])
         np.testing.assert_allclose(
             [
                 second_anchor.pose.position.x,
                 second_anchor.pose.position.y,
                 second_anchor.pose.position.z,
             ],
-            [1.5, 1.0, 0.8])
+            [1.0, 1.0, 0.8],
+            atol=1e-6)
 
         first_rot = Rotation.from_quat([
             first_anchor.pose.orientation.x,
@@ -252,9 +253,9 @@ class TestTeleop02WbtOperator(unittest.TestCase):
             second_anchor.pose.orientation.w,
         ])
         np.testing.assert_allclose(
-            first_rot.as_euler('ZYX'), [0.1, 0.2, 0.3], atol=1e-6)
+            first_rot.as_euler('ZYX'), [np.pi / 2, 0.2, 0.3], atol=1e-6)
         np.testing.assert_allclose(
-            second_rot.as_euler('ZYX'), [0.06, -0.2, 0.1], atol=1e-6)
+            second_rot.as_euler('ZYX'), [np.pi / 2, -0.2, 0.1], atol=1e-6)
 
 
 class TestTeleop02WbtInferenceRunner(unittest.TestCase):
