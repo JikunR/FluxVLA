@@ -71,7 +71,7 @@ inference_model = dict(
             max_delay=7,
             distribution='exponential',  # 'exponential'（推荐）或 'uniform'
         )),
-    )
+)
 
 train_dataloader = dict(
     per_device_batch_size=8,
@@ -89,7 +89,7 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    '/root/dataset/real/loco-mani/wbt_water/loco_mani_wbt_water_0413_xyyaw_delta_wrist_camera',  # noqa: E501
+                    '/root/dataset/real/loco-mani/water_basket/water_basket_0415_xyyaw_delta_wrist_camera',  # noqa: E501
                 ],
                 transforms=[
                     dict(

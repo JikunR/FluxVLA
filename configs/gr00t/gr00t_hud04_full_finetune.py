@@ -90,7 +90,9 @@ train_dataloader = dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    '/root/dataset/real/loco-mani/wbt_water/loco_mani_wbt_water_0413_xyyaw_delta_wrist_camera',  # noqa: E501
+                    '/root/dataset/real/loco-mani/water_basket/water_basket_0415_476_delta_body_frame',  # noqa: E501
+                    # '/root/dataset/real/loco-mani/water_basket/water_basket_0415_xyyaw_delta_wrist_camera',  # noqa: E501
+                    # '/root/dataset/real/loco-mani/water_basket/loco_mani_wbt_teleop0415_0422_371_500_500epi_basket_bottle_xyyaw_delta_wrist_camera',  # noqa: E501
                 ],
                 transforms=[
                     dict(
@@ -140,8 +142,8 @@ train_dataloader = dict(
 
 runner = dict(
     type='FSDPTrainRunner',
-    max_epochs=60,
-    save_epoch_interval=10,
+    max_epochs=20,
+    save_epoch_interval=2,
     max_keep_ckpts=10,
     learning_rate=2e-5,
     weight_decay=0.0,
