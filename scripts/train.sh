@@ -6,12 +6,12 @@ MLP_ROLE_INDEX=0
 MLP_WORKER_0_HOST=localhost
 MLP_WORKER_0_PORT=29500
 
-CONFIG=${1:-"configs/gr00t/gr00t_hud04_full_finetune.py"}
-WORK_DIR=${2:-"/limx_embmc/tos/users/jace/fluxvla/gr00t_water_basket_0415_476_delta_body_frame"}
+CONFIG=${1:-"configs/gr00t/gr00t_hud04_rtc_full_finetune.py"}
+WORK_DIR=${2:-"/data/jace/fluxvla_output/gr00t_rtc_water_basket_0415_701_delta_body_frame"}
 TRAIN_TIME=$(date +"%Y%m%d_%H%M%S")
 WORK_DIR="${WORK_DIR}_${TRAIN_TIME}"
 
-# export CUDA_VISIBLE_DEVICES=0,1
+# export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 torchrun \
   --nproc-per-node="${MLP_WORKER_GPU}" \
