@@ -48,14 +48,14 @@ class AlohaInferenceRunner(BaseInferenceRunner):
                  gripper_threshold: float = 0.05,
                  prepare_pose: List[float] = None,
                  async_execution: bool = False,
-                 execute_horizon: int = None,
+                 horizon_config: dict = None,
                  postprocess_config: dict = None,
                  *args,
                  **kwargs):
         self.gripper_threshold = gripper_threshold
         self.async_execution = async_execution
-        self.execute_horizon = execute_horizon
-        self.postprocess_config = postprocess_config or {}
+        self.horizon_config = horizon_config or {}
+        self.postprocess_config = postprocess_config
         # Set Aloha-specific defaults
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
             kwargs['camera_names'] = [
@@ -242,6 +242,50 @@ class AlohaInferenceRunner(BaseInferenceRunner):
     GRIPPER_CLOSED = -0.01
     DEFAULT_JOINT_DOF_INDICES = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
 
+    def _compute_horizon(self, actions):
+        """Compute execute horizon from ``horizon_config``.
+
+        Two mutually exclusive modes configured via ``horizon_config``:
+
+        - **Fixed** (``dynamic`` absent or False): use ``execute_horizon``
+          as-is.  ``None`` means execute the full trajectory.
+        - **Dynamic** (``dynamic=True``): analyse the motion profile to
+          ensure replanning only happens after real motion has begun.
+
+        Returns:
+            int or None: number of steps to execute, or None for all.
+        """
+        cfg = self.horizon_config
+        if not cfg:
+            return None
+        if cfg.get('dynamic', False):
+            return self._motion_aware_horizon(actions)
+        return cfg.get('execute_horizon')
+
+    def _motion_aware_horizon(self, actions):
+        """Find the first step with significant motion and pad forward.
+
+        Prevents async re-planning from getting stuck in repeated startup
+        delays by ensuring actual motion is included before the next replan.
+
+        Returns:
+            int: number of steps to execute.
+        """
+        cfg = self.horizon_config
+        threshold = cfg.get('motion_threshold', 0.05)
+        min_steps = cfg.get('min_motion_steps', 3)
+        cap = cfg.get('max_horizon', len(actions))
+
+        displacement = np.linalg.norm(actions - actions[0:1], axis=1)
+
+        moving = np.nonzero(displacement > threshold)[0]
+        if len(moving) > 0:
+            horizon = int(moving[0]) + min_steps
+        else:
+            horizon = len(actions)
+
+        return min(horizon, cap, len(actions))
+
     def _postprocess_actions(self, raw_action):
         """Denormalize, apply jerk-constrained smoothing, and snap grippers."""
         raw_chunk_actions = super()._postprocess_actions(raw_action)
@@ -288,11 +332,14 @@ class AlohaInferenceRunner(BaseInferenceRunner):
         """Execute dual-arm actions (sync or async).
 
         In async mode, skips steps that elapsed during inference.
+        Uses dynamic horizon to avoid replanning during startup delay.
         """
         if self.disable_puppet_arm:
             return
 
         ctx = self._action_ctx
+
+        horizon = self._compute_horizon(actions)
 
         if self.async_execution and self._prev_ctx is not None:
             ctx.action_timestamp = ctx.inference_start
@@ -300,8 +347,8 @@ class AlohaInferenceRunner(BaseInferenceRunner):
             actions = self._resample_remaining(actions, offset)
         else:
             ctx.action_timestamp = time.time()
-            if self.execute_horizon is not None:
-                actions = actions[:self.execute_horizon]
+            if horizon is not None:
+                actions = actions[:horizon]
 
         self.ros_operator.execute_trajectory(
             actions[:, :7],
@@ -310,8 +357,13 @@ class AlohaInferenceRunner(BaseInferenceRunner):
             async_exec=self.async_execution,
             base_velocity=actions[:, 14:16] if self.use_robot_base else None)
 
-        if self.async_execution and self.execute_horizon is not None:
-            time.sleep(self.execute_horizon * self.dt)
+        if self.async_execution and horizon is not None:
+            time.sleep(horizon * self.dt)
+
+        prev = self._prev_ctx
+        if prev is not None and hasattr(prev, 'action_timestamp'):
+            dt = ctx.action_timestamp - prev.action_timestamp
+            print(f'[FPS] {1.0 / dt: .1f} chunk/s ({dt: .3f}s)')
 
     def cleanup(self):
         """Clean up resources."""
