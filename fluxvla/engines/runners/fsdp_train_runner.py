@@ -102,6 +102,8 @@ class FSDPTrainRunner(BaseTrainRunner):
                  mixed_precision_dtype: str = 'bf16',
                  sharding_strategy: str = 'hybrid-shard',
                  change_key_name: bool = False,
+                 optimizer_type: str = 'adamw',
+                 optimizer_betas: tuple = (0.9, 0.999),
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
                  *args,
@@ -114,7 +116,8 @@ class FSDPTrainRunner(BaseTrainRunner):
                          enable_gradient_checkpointing,
                          enable_mixed_precision_training,
                          reduce_in_full_precision, mixed_precision_dtype,
-                         tokenizer, resume_from)
+                         optimizer_type, optimizer_betas, tokenizer,
+                         resume_from)
         self.weight_decay = weight_decay
         self.max_grad_norm = max_grad_norm
         self.lr_schedule = lr_schedule
@@ -426,8 +429,8 @@ class FSDPTrainRunner(BaseTrainRunner):
             f'                 |-> Parameter Precision = {fsdp_precision_policy.param_dtype}\n'  # noqa: E221, E501
             f'                 |-> Reduction Precision = {fsdp_precision_policy.reduce_dtype}\n'  # noqa: E221, E501
             f'                 |-> Buffer Precision = {fsdp_precision_policy.buffer_dtype}\n\n'  # noqa: E221, E501
-            f'         |-> Default AdamW LR = {self.learning_rate}\n'  # noqa: E221, E501
-            f'         |-> AdamW Weight Decay = {self.weight_decay}\n'  # noqa: E221, E501
+            f'         |-> Default {self.optimizer_type.upper()} LR = {self.learning_rate}\n'  # noqa: E221, E501
+            f'         |-> {self.optimizer_type.upper()} Weight Decay = {self.weight_decay}\n'  # noqa: E221, E501
             f'         |-> LR Scheduler Type = {self.lr_scheduler_type}\n'  # noqa: E221, E501
             f'         |-> LR Scheduler Warm-up Steps (Ratio) = {num_warmup_steps} ({self.warmup_ratio})\n'  # noqa: E221, E501
             f'         |-> Dataset Size = {n_train_examples} Examples\n'  # noqa: E221, E501

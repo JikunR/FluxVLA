@@ -152,6 +152,7 @@ runner = dict(
     learning_rate=1e-4,
     weight_decay=0.01,
     max_grad_norm=10.0,
+    optimizer_type='muon',
     optimizer_betas=(0.9, 0.95),
     min_lr_rate=0.025,
     collator=dict(

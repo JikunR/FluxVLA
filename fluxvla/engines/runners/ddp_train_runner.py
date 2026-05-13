@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import torch
-import wandb
 from peft import LoraConfig, PeftModel, get_peft_model
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+import wandb
 from fluxvla.engines.utils import build_vla_from_cfg
 from fluxvla.engines.utils.overwatch import initialize_overwatch
 from ..utils.root import RUNNERS
@@ -75,6 +75,8 @@ class DDPTrainRunner(BaseTrainRunner):
                  enable_mixed_precision_training: bool = True,
                  reduce_in_full_precision: bool = True,
                  mixed_precision_dtype: str = 'bf16',
+                 optimizer_type: str = 'adamw',
+                 optimizer_betas: tuple = (0.9, 0.999),
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
                  **kwargs) -> None:
@@ -100,6 +102,8 @@ class DDPTrainRunner(BaseTrainRunner):
             enable_mixed_precision_training=enable_mixed_precision_training,
             reduce_in_full_precision=reduce_in_full_precision,
             mixed_precision_dtype=mixed_precision_dtype,
+            optimizer_type=optimizer_type,
+            optimizer_betas=optimizer_betas,
             tokenizer=tokenizer,
             resume_from=resume_from)
 
@@ -543,8 +547,8 @@ class DDPTrainRunner(BaseTrainRunner):
             state_compatible = True
             for key, value in ckpt_state.items():
                 if isinstance(value, torch.Tensor):
-                    if key in ['exp_avg', 'exp_avg_sq'
-                               ] and value.shape != current_param.shape:
+                    if key in ('exp_avg', 'exp_avg_sq', 'momentum'
+                               ) and value.shape != current_param.shape:
                         state_compatible = False
                         if overwatch.is_rank_zero():
                             overwatch.debug(
@@ -607,8 +611,8 @@ class DDPTrainRunner(BaseTrainRunner):
             state_compatible = True
             for key, value in ckpt_state.items():
                 if isinstance(value, torch.Tensor):
-                    if key in ['exp_avg', 'exp_avg_sq'
-                               ] and value.shape != current_param.shape:
+                    if key in ('exp_avg', 'exp_avg_sq', 'momentum'
+                               ) and value.shape != current_param.shape:
                         state_compatible = False
                         break
 

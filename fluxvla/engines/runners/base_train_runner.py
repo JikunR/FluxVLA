@@ -31,6 +31,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from fluxvla.engines.utils import check_bloat16_supported
 from fluxvla.engines.utils.name_map import str_to_dtype
 from fluxvla.engines.utils.torch_utils import worker_init_function
+from fluxvla.optimizers.muon import Muon
 from fluxvla.optimizers.schedulers import (get_constant_schedule,
                                            get_cosine_schedule_with_warmup,
                                            get_step_based_schedule)
@@ -96,6 +97,8 @@ class BaseTrainRunner(ABC):
                  enable_mixed_precision_training: bool = True,
                  reduce_in_full_precision: bool = True,
                  mixed_precision_dtype: str = 'bf16',
+                 optimizer_type: str = 'adamw',
+                 optimizer_betas: tuple = (0.9, 0.999),
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None):
         from ..utils.builder import (build_collator_from_cfg,
@@ -131,6 +134,8 @@ class BaseTrainRunner(ABC):
         self.max_epochs = max_epochs
         self.max_steps = max_steps
         self.learning_rate = learning_rate
+        self.optimizer_type = optimizer_type
+        self.optimizer_betas = optimizer_betas
         self.collator = build_collator_from_cfg(collator)
         self.sampler = sampler
         self.save_iter_interval = save_iter_interval
@@ -482,6 +487,25 @@ class BaseTrainRunner(ABC):
                     overwatch.warning(
                         f'Failed to remove checkpoint {old_ckpt}: {e}')
 
+    def _create_optimizer(self, groups):
+        """Create optimizer instance based on ``self.optimizer_type``.
+
+        Args:
+            groups: Parameter groups (list of dicts or list of params).
+        """
+        if self.optimizer_type == 'muon':
+            self.optimizer = Muon(
+                groups,
+                lr=self.learning_rate,
+                betas=self.optimizer_betas,
+            )
+        else:
+            self.optimizer = AdamW(
+                groups,
+                lr=self.learning_rate,
+                betas=self.optimizer_betas,
+            )
+
     def _setup_optimizer_and_scheduler(
         self,
         n_train_examples: int,
@@ -548,7 +572,7 @@ class BaseTrainRunner(ABC):
                 ]
 
             # Create Optimizer & LR Scheduler
-            self.optimizer = AdamW(groups, lr=self.learning_rate)
+            self._create_optimizer(groups)
             self.lr_scheduler = get_cosine_schedule_with_warmup(
                 self.optimizer, num_warmup_steps, num_training_steps)
             for param_group in self.optimizer.param_groups:
@@ -586,7 +610,7 @@ class BaseTrainRunner(ABC):
                 ]
 
             # Create Optimizer & LR Scheduler
-            self.optimizer = AdamW(groups, lr=self.learning_rate)
+            self._create_optimizer(groups)
             self.lr_scheduler = get_constant_schedule(self.optimizer)
 
         elif self.lr_scheduler_type == 'step-based':
@@ -625,7 +649,7 @@ class BaseTrainRunner(ABC):
                 ]
 
             # Create Optimizer & Step-based LR Scheduler
-            self.optimizer = AdamW(groups, lr=self.learning_rate)
+            self._create_optimizer(groups)
             self.lr_scheduler = get_step_based_schedule(
                 self.optimizer, num_training_steps, lr_schedule)
 
@@ -875,7 +899,9 @@ class BaseTrainRunner(ABC):
             p for p in self.vla.parameters() if p.requires_grad
         ]
         current_lr = self.optimizer.param_groups[0]['lr']
-        self.optimizer = torch.optim.AdamW(trainable_params, lr=current_lr)
+        self._create_optimizer(trainable_params)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = current_lr
         self.optimizer_state_loaded = False
         if self.lr_scheduler and hasattr(self.lr_scheduler, 'optimizer'):
             self.lr_scheduler.optimizer = self.optimizer
