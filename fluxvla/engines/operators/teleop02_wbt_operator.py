@@ -361,29 +361,31 @@ class Teleop02WbtOperator:
         # x/y/yaw are i -> i+1 frame deltas. x/y are expressed in the
         # current frame's body frame, so rotate them by current yaw before
         # integrating into world position. z/pitch/roll are absolute values.
-        cos_yaw = np.cos(self._accum_base_yaw)
-        sin_yaw = np.sin(self._accum_base_yaw)
-        delta_x_body, delta_y_body = base_pos_action[:2]
-        self._accum_base_pos[0] += (
-            cos_yaw * delta_x_body - sin_yaw * delta_y_body)
-        self._accum_base_pos[1] += (
-            sin_yaw * delta_x_body + cos_yaw * delta_y_body)
-        self._accum_base_pos[2] = base_pos_action[2]
+        # cos_yaw = np.cos(self._accum_base_yaw)
+        # sin_yaw = np.sin(self._accum_base_yaw)
+        # delta_x_body, delta_y_body = base_pos_action[:2]
+        # self._accum_base_pos[0] += (
+        #     cos_yaw * delta_x_body - sin_yaw * delta_y_body)
+        # self._accum_base_pos[1] += (
+        #     sin_yaw * delta_x_body + cos_yaw * delta_y_body)
+        # self._accum_base_pos[2] = base_pos_action[2]
 
-        base_action_euler = _rot6d_to_rotation(
-            base_rot6d_action).as_euler('ZYX')
-        self._accum_base_yaw = _wrap_to_pi(
-            self._accum_base_yaw + base_action_euler[0])
-        self._accum_base_rot = Rotation.from_euler(
-            'ZYX',
-            [
-                self._accum_base_yaw,
-                base_action_euler[1],
-                base_action_euler[2],
-            ])
+        # base_action_euler = _rot6d_to_rotation(
+        #     base_rot6d_action).as_euler('ZYX')
+        # self._accum_base_yaw = _wrap_to_pi(
+        #     self._accum_base_yaw + base_action_euler[0])
+        # self._accum_base_rot = Rotation.from_euler(
+        #     'ZYX',
+        #     [
+        #         self._accum_base_yaw,
+        #         base_action_euler[1],
+        #         base_action_euler[2],
+        #     ])
 
-        base_pos = self._accum_base_pos
-        base_quat_xyzw = self._accum_base_rot.as_quat()
+        # base_pos = self._accum_base_pos
+        # base_quat_xyzw = self._accum_base_rot.as_quat()
+        base_pos = base_pos_action
+        base_quat_xyzw = _rot6d_to_quat_xyzw(base_rot6d_action)
 
         # Construct TeleopMsg
         teleop_msg = TeleopMsg()

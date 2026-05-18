@@ -177,7 +177,7 @@ inference = dict(
     type='Teleop02WbtRTCInferenceRunner',
     seed=7,
     async_execution=True,
-    execute_horizon=10,
+    execute_horizon=20, #10
     rtc_config=dict(
         enabled=True,
         method='prefix',
@@ -185,7 +185,8 @@ inference = dict(
     ),
     task_descriptions={
         '1':
-        'Use the right hand to pick up the basket from the table. Turn around and walk to the cabinet. Use the left hand to pick up the bottle from the cabinet and place it into the basket held in the right hand. Then turn around, walk back to the table, and place the basket on the table.',  # noqa: E501
+        # 'Lower the head, place two hands upon the white deak, pick up the red basket with the right hand, place the green snack, tissue paper, and coke in the red basket with your left hand one by one, finally place two hands at sides.',  # noqa: E501
+        'Lift up the red basket with right arm, put all the objects on the white table into the red basket with left arm, place the red basket on the table.',  # noqa: E501
     },
     mixed_precision_dtype='bf16',
     dataset=dict(
