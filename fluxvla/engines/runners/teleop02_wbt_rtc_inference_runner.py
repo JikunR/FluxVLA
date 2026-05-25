@@ -32,12 +32,23 @@ class Teleop02WbtRTCInferenceRunner(Teleop02WbtInferenceRunner):
     _predict_action, which conditions the model on previously predicted
     actions for smoother trajectory stitching across inference chunks.
 
+    Trajectory post-processing (OSQP-based ``joint_mpc`` or Ruckig
+    jerk-limited filter) is inherited from the parent runner via the
+    ``postprocess_config`` keyword and composes cleanly with RTC: RTC
+    handles cross-chunk consistency at prediction time, while the
+    post-processor handles execution-side high-order constraints and
+    boundary stitching.
+
     Args:
         rtc_config (dict, optional): RTC configuration dict. Expected keys:
             - enabled (bool): Whether RTC is active.
             - method (str): 'prefix' or 'guidance'.
             - prefix_len (int, optional): Number of prefix steps. If None,
               estimated from last inference time.
+        postprocess_config (dict, optional): Forwarded to the parent
+            runner. See ``Teleop02WbtInferenceRunner`` for the supported
+            keys (``method``, ``mode``, ``num_stitch``, ``max_velocity``,
+            ``max_acceleration``, ``max_jerk``, ``tracking_weight`` ...).
     """
 
     def __init__(self, rtc_config: dict = None, *args, **kwargs):

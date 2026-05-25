@@ -24,6 +24,8 @@ import cv2
 import numpy as np
 import torch
 
+from ..utils.postprocess import Trajectory, TrajectoryPostprocessor
+from ..utils.postprocess.plot_utils import plot_postprocess_comparison
 from ..utils.root import RUNNERS
 from .aloha_inference_runner import resample_remaining
 from .base_inference_runner import BaseInferenceRunner
@@ -41,6 +43,13 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         - 1 head camera + 1 left wrist camera
         - 33-dim state (31 joints + 2 hand_closed)
         - 42-dim action (31 joint q + 9 base_pose + 2 hand_closed)
+
+    Optional trajectory post-processing (OSQP-based ``joint_mpc`` or
+    Ruckig jerk-limited filter) can be enabled via ``postprocess_config``
+    and is applied to the first 31 joint command channels. Base-pose and
+    hand-closed channels are left untouched. The hook is fully backward
+    compatible: when ``postprocess_config`` is missing or its ``enabled``
+    flag is False, the previous behaviour is preserved exactly.
     """
 
     def __init__(self,
@@ -48,6 +57,7 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
                  execute_horizon: int = None,
                  debug_jpeg_dump_dir: str = None,
                  debug_jpeg_dump_max_frames: int = 10,
+                 postprocess_config: dict = None,
                  *args,
                  **kwargs):
         self.async_execution = async_execution
@@ -55,6 +65,7 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         self.debug_jpeg_dump_dir = debug_jpeg_dump_dir
         self.debug_jpeg_dump_max_frames = debug_jpeg_dump_max_frames
         self._debug_jpeg_dump_count = 0
+        self.postprocess_config = postprocess_config or {}
 
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
             kwargs['camera_names'] = ['head', 'left_wrist']
@@ -82,6 +93,8 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
         self._running = True
         self._dt = 1.0 / self.publish_rate
         self._model_warmed_up = False
+        self.trajectory_postprocessor = TrajectoryPostprocessor(
+            config=self.postprocess_config)
 
         # Register signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -350,6 +363,56 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
             f'{(time.perf_counter() - predict_start) * 1000.0:.3f} ms',
             flush=True)
         return raw_action
+
+    # Action layout (42-dim):
+    #   [0:31]  joint position commands (q)        ← smoothed by MPC/Ruckig
+    #   [31:34] base_link position (delta_x/y, z)  ← passed through
+    #   [34:40] base_link rotation as rot6d        ← passed through
+    #   [40]    left_hand_closed                   ← passed through
+    #   [41]    right_hand_closed                  ← passed through
+    DEFAULT_JOINT_DOF_INDICES = list(range(0, 31))
+
+    def _postprocess_actions(self, raw_action):
+        """Denormalize then optionally apply jerk-constrained smoothing.
+
+        Falls back to the base implementation (no-op postprocessor returns a
+        copy of the raw trajectory) when ``postprocess_config.enabled`` is
+        False, preserving backward compatibility.
+        """
+        raw_chunk_actions = super()._postprocess_actions(raw_action)
+        raw_trajectory = Trajectory(
+            t0=self._action_ctx.inference_start,
+            dt=self._dt,
+            positions=raw_chunk_actions,
+        )
+        self._action_ctx.raw_trajectory = raw_trajectory.copy()
+
+        previous_trajectory = getattr(self._prev_ctx, 'trajectory', None)
+        processed_trajectory = self.trajectory_postprocessor.process(
+            traj=raw_trajectory,
+            dof_indices=self.DEFAULT_JOINT_DOF_INDICES,
+            prev_traj=previous_trajectory)
+
+        self._action_ctx.trajectory = processed_trajectory
+        self._debug_plot(processed_trajectory)
+        return processed_trajectory.positions
+
+    def _debug_plot(self, processed_traj):
+        """Async debug plot comparing raw vs post-processed trajectories."""
+        if not self.postprocess_config.get('debug_plot', False):
+            return
+        prev = self._prev_ctx
+        prev_raw = getattr(prev, 'raw_trajectory', None)
+        prev_post = getattr(prev, 'trajectory', None)
+
+        plot_postprocess_comparison(
+            dof_indices=self.DEFAULT_JOINT_DOF_INDICES,
+            cur_raw=self._action_ctx.raw_trajectory,
+            cur_post=processed_traj,
+            prev_raw=prev_raw,
+            prev_post=prev_post,
+            plot_dofs=self.postprocess_config.get('debug_plot_dofs'),
+        )
 
     def _execute_actions(self, actions: np.ndarray, rate):
         """Execute actions (sync or async).
