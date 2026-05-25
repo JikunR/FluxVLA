@@ -18,7 +18,7 @@ import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List
+from typing import Dict
 
 import cv2
 import numpy as np
@@ -364,49 +364,48 @@ class Teleop02WbtInferenceRunner(BaseInferenceRunner):
             flush=True)
         return raw_action
 
-    # Action layout (42-dim):
-    #   [0:31]  joint position commands (q)        ← smoothed by MPC/Ruckig
-    #   [31:34] base_link position (delta_x/y, z)  ← passed through
-    #   [34:40] base_link rotation as rot6d        ← passed through
-    #   [40]    left_hand_closed                   ← passed through
-    #   [41]    right_hand_closed                  ← passed through
-    DEFAULT_JOINT_DOF_INDICES = list(range(0, 31))
+    DEFAULT_JOINT_DOF_INDICES = list(range(31))
 
     def _postprocess_actions(self, raw_action):
-        """Denormalize then optionally apply jerk-constrained smoothing.
+        """Denormalize and optionally run trajectory postprocessing."""
+        denormalized = self.denormalize_action(
+            dict(action=raw_action.cpu().numpy()))
+        denormalized = denormalized[:self.action_chunk]
 
-        Falls back to the base implementation (no-op postprocessor returns a
-        copy of the raw trajectory) when ``postprocess_config.enabled`` is
-        False, preserving backward compatibility.
-        """
-        raw_chunk_actions = super()._postprocess_actions(raw_action)
+        if not self.postprocess_config.get('enabled', False):
+            return denormalized
+
         raw_trajectory = Trajectory(
-            t0=self._action_ctx.inference_start,
+            t0=getattr(self._action_ctx, 'inference_start', time.time()),
             dt=self._dt,
-            positions=raw_chunk_actions,
+            positions=denormalized,
         )
         self._action_ctx.raw_trajectory = raw_trajectory.copy()
 
-        previous_trajectory = getattr(self._prev_ctx, 'trajectory', None)
-        processed_trajectory = self.trajectory_postprocessor.process(
+        dof_indices = self.postprocess_config.get(
+            'dof_indices', self.DEFAULT_JOINT_DOF_INDICES)
+        prev_traj = getattr(self._prev_ctx, 'trajectory', None)
+        processed = self.trajectory_postprocessor.process(
             traj=raw_trajectory,
-            dof_indices=self.DEFAULT_JOINT_DOF_INDICES,
-            prev_traj=previous_trajectory)
+            dof_indices=dof_indices,
+            prev_traj=prev_traj,
+        )
 
-        self._action_ctx.trajectory = processed_trajectory
-        self._debug_plot(processed_trajectory)
-        return processed_trajectory.positions
+        self._action_ctx.trajectory = processed
+        self._debug_plot(processed)
+        return processed.positions
 
     def _debug_plot(self, processed_traj):
-        """Async debug plot comparing raw vs post-processed trajectories."""
         if not self.postprocess_config.get('debug_plot', False):
             return
         prev = self._prev_ctx
         prev_raw = getattr(prev, 'raw_trajectory', None)
         prev_post = getattr(prev, 'trajectory', None)
+        dof_indices = self.postprocess_config.get(
+            'dof_indices', self.DEFAULT_JOINT_DOF_INDICES)
 
         plot_postprocess_comparison(
-            dof_indices=self.DEFAULT_JOINT_DOF_INDICES,
+            dof_indices=dof_indices,
             cur_raw=self._action_ctx.raw_trajectory,
             cur_post=processed_traj,
             prev_raw=prev_raw,
