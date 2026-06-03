@@ -66,6 +66,9 @@ class LiberoEvalRunner(BaseEvalRunner):
         enable_mixed_precision_training (bool): Whether to enable mixed
             precision training.
             Default is True.
+        save_video_pred (bool): For world-action models (e.g. DreamZero),
+            decode the model's predicted future video and save it as an MP4
+            under the checkpoint root directory. Default is False.
     """
 
     @staticmethod
@@ -92,7 +95,8 @@ class LiberoEvalRunner(BaseEvalRunner):
                  num_trials_per_task: int = 50,
                  num_steps_wait: int = 10,
                  mixed_precision_dtype: str = 'bf16',
-                 enable_mixed_precision_training: bool = True):
+                 enable_mixed_precision_training: bool = True,
+                 save_video_pred: bool = False):
         from fluxvla.engines import (build_dataset_from_cfg,
                                      build_transform_from_cfg)
         self.device_id = overwatch.local_rank()
@@ -161,6 +165,8 @@ class LiberoEvalRunner(BaseEvalRunner):
         self.mixed_precision_dtype = str_to_dtype(mixed_precision_dtype)
         self.enable_mixed_precision_training = enable_mixed_precision_training
         self.distributed_state = overwatch.distributed_state
+        self.save_video_pred = save_video_pred
+        self._save_video_pred = False
 
         if os.path.isfile(data_stat_path):
             with open(data_stat_path, 'r') as f:
@@ -187,6 +193,14 @@ class LiberoEvalRunner(BaseEvalRunner):
                 device=self.device_id, dtype=self.mixed_precision_dtype)
         else:
             self.vla.cuda(self.device_id)
+        # DreamZero is a world-action model: when ``save_video_pred`` is set in
+        # the eval config, decode and save its predicted future video alongside
+        # the input replay video.
+        self._save_video_pred = (
+            self.save_video_pred
+            and hasattr(self.vla, 'enable_video_prediction'))
+        if self._save_video_pred:
+            self.vla.enable_video_prediction(True)
 
     def run(self):
         """Run the evaluation process."""
@@ -273,6 +287,8 @@ class LiberoEvalRunner(BaseEvalRunner):
                 t = 0
                 replay_images = []
                 next_batch = None
+                if self._save_video_pred:
+                    self.vla.reset_video_prediction()
                 if self.task_suite_name == 'libero_spatial':
                     max_steps = 220  # longest training demo has 193 steps
                 elif self.task_suite_name == 'libero_object':
@@ -344,13 +360,31 @@ class LiberoEvalRunner(BaseEvalRunner):
                 total_episodes += 1
                 step_tensor = torch.ones(1, device=torch.cuda.current_device())
                 # Save a replay video of the episode
+                ckpt_root = Path(self.ckpt_path).resolve().parent.parent
                 save_rollout_video(
                     replay_images,
                     local_id,
                     success=done,
                     task_description=task_description,
-                    work_dir=Path(self.ckpt_path).resolve().parent.parent,
+                    work_dir=ckpt_root,
                     log_file=log_file)
+                # Decode and save DreamZero's predicted future video.
+                if self._save_video_pred:
+                    try:
+                        pred_video_path = os.path.join(
+                            ckpt_root, f'pred_video_episode{local_id}_'
+                            f'task{task_id}_success={bool(done)}.mp4')
+                        saved = self.vla.decode_and_save_video(pred_video_path)
+                        if saved is not None:
+                            overwatch.info(
+                                f'Saved predicted video to: {saved}')
+                            log_file.write(
+                                f'Saved predicted video to: {saved}\n')
+                    except Exception as e:  # noqa: BLE001
+                        overwatch.warning(
+                            f'Failed to save predicted video: {e}')
+                        log_file.write(
+                            f'Failed to save predicted video: {e}\n')
                 env.close()
 
                 # except Exception as e:
