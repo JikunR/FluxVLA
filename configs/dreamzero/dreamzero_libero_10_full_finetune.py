@@ -187,6 +187,9 @@ eval = dict(
     seed=7,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
+    # Decode and save DreamZero's predicted future video (MP4) to the ckpt
+    # root directory, in addition to the input rollout replay video.
+    save_video_pred=True,
     dataset=dict(
         type='LiberoParquetEvalDataset',
         img_buffer_len=1,

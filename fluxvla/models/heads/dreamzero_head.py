@@ -423,6 +423,10 @@ class DreamZeroHead(nn.Module):
         self.inference_ys = None
         self.inference_prompt_embs = None
         self.current_start_frame = 0
+        # Latent of the most recently denoised future-video block, kept so the
+        # VLA can optionally VAE-decode the model's video prediction. Shape:
+        # [B, C_lat, denoise_frames, lat_h, lat_w].
+        self.last_video_latent = None
 
     def _as_prompt_emb_list(self, prompt_embs):
         if isinstance(prompt_embs, torch.Tensor):
@@ -662,7 +666,7 @@ class DreamZeroHead(nn.Module):
             noisy_latents = noisy_latents.to(dtype=latents_dtype)
             noisy_actions = noisy_actions.to(dtype=latents_dtype)
 
-        return noisy_actions
+        return noisy_actions, noisy_latents
 
     def _predict_action_stateless(
         self,
@@ -705,7 +709,7 @@ class DreamZeroHead(nn.Module):
         if observed_latent_frames <= 1:
             denoise_frames = 1
 
-        return self._sample_action_block(
+        noisy_actions, video_latent = self._sample_action_block(
             prompt_embs=prompt_embs,
             clip_feas=clip_feas,
             ys=ys,
@@ -726,6 +730,8 @@ class DreamZeroHead(nn.Module):
             ),
             num_inference_steps=num_inference_steps,
         )
+        self.last_video_latent = video_latent
+        return noisy_actions
 
     # ------------------------------------------------------------------
     # Inference
@@ -863,7 +869,7 @@ class DreamZeroHead(nn.Module):
 
             denoise_frames = self.num_frame_per_block
 
-            noisy_actions = self._sample_action_block(
+            noisy_actions, video_latent = self._sample_action_block(
                 prompt_embs=prompt_embs,
                 clip_feas=self.inference_clip_feas,
                 ys=self.inference_ys,
@@ -879,6 +885,7 @@ class DreamZeroHead(nn.Module):
                 latents_shape=latents_shape,
                 num_inference_steps=num_inference_steps,
             )
+            self.last_video_latent = video_latent
 
             self.current_start_frame += denoise_frames
         return noisy_actions

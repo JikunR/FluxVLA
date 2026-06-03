@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Callable, Dict, List, Optional
 
 import torch
+from einops import rearrange
 
 from fluxvla.engines import VLAS, initialize_overwatch
 from .base_vla import BaseVLA
@@ -82,6 +84,14 @@ class DreamZeroVLA(BaseVLA):
         self.use_cache = use_cache
         self.vla_head.use_cache = use_cache
         self.all_module_keys = ['vlm_backbone', 'vla_head']
+
+        # Optional capture of the model's predicted future-video latents during
+        # inference. When enabled, every ``predict_action`` call stashes the
+        # denoised video-latent block so it can later be VAE-decoded and saved
+        # as an MP4 (see ``decode_and_save_video``). Disabled by default to keep
+        # the standard action-only inference path untouched.
+        self._collect_video_pred = False
+        self._video_latent_buffer: List[torch.Tensor] = []
 
     def _prepare_states(self, states: torch.Tensor,
                         num_tokens: int) -> torch.Tensor:
@@ -364,7 +374,78 @@ class DreamZeroVLA(BaseVLA):
         if self.use_cache:
             head_kwargs['observed_latent_frames'] = observed_latent_frames
 
-        return self.vla_head.predict_action(**head_kwargs)
+        actions = self.vla_head.predict_action(**head_kwargs)
+
+        if self._collect_video_pred:
+            self._stash_video_latent()
+
+        return actions
+
+    # ------------------------------------------------------------------
+    # Video prediction capture / decoding
+    # ------------------------------------------------------------------
+    def enable_video_prediction(self, enabled: bool = True) -> None:
+        """Toggle capturing the model's predicted future-video latents."""
+        self._collect_video_pred = enabled
+        if not enabled:
+            self._video_latent_buffer = []
+
+    def reset_video_prediction(self) -> None:
+        """Drop any accumulated video latents (call at episode start)."""
+        self._video_latent_buffer = []
+
+    def _stash_video_latent(self) -> None:
+        """Move the head's latest predicted video-latent block to the buffer."""
+        latent = getattr(self.vla_head, 'last_video_latent', None)
+        if latent is None:
+            return
+        # Keep latents on CPU to avoid growing GPU memory across a long episode;
+        # they are tiny compared to decoded RGB frames.
+        self._video_latent_buffer.append(latent.detach().to('cpu'))
+
+    @torch.no_grad()
+    def decode_and_save_video(
+        self,
+        save_path: str,
+        fps: int = 5,
+    ) -> Optional[str]:
+        """VAE-decode the accumulated predicted latents and save an MP4.
+
+        Args:
+            save_path: Destination ``.mp4`` path.
+            fps: Frames per second for the written video.
+
+        Returns:
+            The written path, or ``None`` if there was nothing to decode.
+        """
+        if len(self._video_latent_buffer) == 0:
+            return None
+
+        import imageio
+
+        vae = self.vlm_backbone.vae
+        vae_device = next(vae.parameters()).device
+        # Concatenate predicted blocks along the temporal (latent-frame) axis,
+        # mirroring upstream DreamZero's ``video_across_time`` handling.
+        latents = torch.cat(self._video_latent_buffer, dim=2).to(vae_device)
+
+        frames = vae.decode(
+            latents,
+            tiled=self.vlm_backbone.tiled,
+            tile_size=(self.vlm_backbone.tile_size_height,
+                       self.vlm_backbone.tile_size_width),
+            tile_stride=(self.vlm_backbone.tile_stride_height,
+                         self.vlm_backbone.tile_stride_width),
+        )
+        # [B, C, T, H, W] -> [T, H, W, C], values in [-1, 1] -> uint8.
+        frames = rearrange(frames, 'B C T H W -> B T H W C')[0]
+        frames = ((frames.float() + 1) * 127.5).clamp(0, 255)
+        frames = frames.cpu().numpy().astype('uint8')
+
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        imageio.mimsave(save_path, list(frames), fps=fps, codec='libx264')
+        self._video_latent_buffer = []
+        return save_path
 
     # ------------------------------------------------------------------
     # BaseVLA abstract method implementations
