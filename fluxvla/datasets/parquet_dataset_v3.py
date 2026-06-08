@@ -187,6 +187,10 @@ class ParquetDatasetV3(ParquetDataset):
         self.tasks = all_tasks
         self.episodes = all_episodes
         self.episodes_by_dataset = episodes_by_dataset
+        self.episode_metadata_by_dataset = [{
+            int(record['episode_index']): record
+            for record in records
+        } for records in episodes_by_dataset]
 
         datasets = []
         dataset_sizes = []
@@ -333,6 +337,8 @@ class ParquetDatasetV3(ParquetDataset):
         data['stats'] = dataset_statistics[self.statistic_name]
         data['actions'] = np.array(actions, dtype=np.float32)
         data['action_masks'] = np.array(action_masks, dtype=np.float32)
+        data['episode_metadata'] = self.episode_metadata_by_dataset[
+            dataset_idx].get(int(data['episode_index']), {})
         if self.expose_index:
             data['index'] = np.array(index, dtype=np.int64)
         data['task_description'] = self._resolve_task_description(
