@@ -125,6 +125,50 @@ class ProcessParquetInputs():
         self.num_padding_imgs = num_padding_imgs
         self.dataset_name = dataset_name
 
+    def _build_video_path(self, data, video_key):
+        info = data['info']
+        episode_index = int(data['episode_index'])
+        episode_metadata = data.get('episode_metadata', {})
+        format_kwargs = {
+            'video_key': video_key,
+            'episode_index': episode_index,
+        }
+
+        def _first_available_int(keys):
+            for key in keys:
+                value = episode_metadata.get(key, data.get(key))
+                if value is not None:
+                    return int(value)
+            return None
+
+        chunk_index = _first_available_int([
+            f'videos/{video_key}/chunk_index',
+            'meta/episodes/chunk_index',
+            'data/chunk_index',
+            'chunk_index',
+        ])
+        file_index = _first_available_int([
+            f'videos/{video_key}/file_index',
+            'meta/episodes/file_index',
+            'data/file_index',
+            'file_index',
+        ])
+        if chunk_index is not None:
+            format_kwargs['chunk_index'] = chunk_index
+        if file_index is not None:
+            format_kwargs['file_index'] = file_index
+        if 'chunks_size' in info:
+            format_kwargs['episode_chunk'] = episode_index // int(
+                info['chunks_size'])
+
+        try:
+            relative_video_path = info['video_path'].format(**format_kwargs)
+        except KeyError as exc:
+            raise KeyError(
+                f"Missing video path field '{exc.args[0]}' for episode "
+                f"{episode_index}, video key '{video_key}'") from exc
+        return os.path.join(data['data_root'], relative_video_path)
+
     def decode_video_frames_torchvision(
         self,
         video_path: Path | str,
@@ -228,7 +272,6 @@ class ProcessParquetInputs():
         inputs = dict()
         # Check if the video path is provided in the info
         assert 'video_path' in info, "Input data must contain 'video_path' key"
-        video_root_path = info['video_path']
         for key in self.parquet_keys:
             try:
                 value = data[key]
@@ -258,14 +301,7 @@ class ProcessParquetInputs():
         img_masks = list()
         timestamps = data.get('frame_timestamps', [data['timestamp']])
         for video_key in self.video_keys:
-            episode_chunk = data['episode_index'] // data['info'][
-                'chunks_size']  # noqa: E501
-            video_path = os.path.join(
-                data['data_root'],
-                video_root_path.format(
-                    episode_chunk=episode_chunk,
-                    video_key=video_key,
-                    episode_index=data['episode_index']))
+            video_path = self._build_video_path(data, video_key)
             assert os.path.exists(
                 video_path), f'Video file not found: {video_path}'
             # Load all requested timestamps at once (supports temporal window)
