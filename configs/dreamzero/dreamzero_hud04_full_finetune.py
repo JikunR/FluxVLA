@@ -1,0 +1,258 @@
+# Copyright 2026 Limx Dynamics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+_ckpt_root = './checkpoints'
+_tokenizer = _ckpt_root + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
+
+_frame_window_size = 9
+
+model = dict(
+    type='DreamZeroVLA',
+    num_views=2,
+    frame_window_size=_frame_window_size,
+    pretrained_name_or_path=  # noqa: E251
+    _ckpt_root + '/DreamZero-AgiBot',
+    use_cache=False,
+    vlm_backbone=dict(
+        type='WanBackbone',
+        text_encoder_path=None,
+        image_encoder_path=None,
+        vae_path=None,
+        tiled=False,
+    ),
+    vla_head=dict(
+        type='DreamZeroHead',
+        action_dim=52,
+        max_action_dim=64,
+        action_horizon=10,
+        max_state_dim=64,
+        num_frames=_frame_window_size,
+        num_frame_per_block=2,
+        num_action_per_block=10,
+        num_state_per_block=1,
+        frame_seqlen=128,
+        hidden_size=1024,
+        input_embedding_dim=1536,
+        dit_dim=5120,
+        dit_ffn_dim=13824,
+        dit_num_heads=40,
+        dit_num_layers=40,
+        dit_freq_dim=256,
+        dit_in_dim=36,
+        dit_out_dim=16,
+        max_num_embodiments=32,
+        noise_beta_alpha=1.5,
+        noise_beta_beta=1.0,
+        noise_s=0.999,
+        num_inference_steps=16,
+        use_gradient_checkpointing=True,
+        cfg_scale=1.0,
+        max_chunk_size=-1,
+    ),
+    name_mapping={
+        'vla_head.model': 'action_head.model',
+        'vlm_backbone.text_encoder': 'action_head.text_encoder',
+        'vlm_backbone.image_encoder': 'action_head.image_encoder',
+        'vlm_backbone.vae': 'action_head.vae',
+    },
+)
+
+train_dataloader = dict(
+    per_device_batch_size=2,
+    per_device_num_workers=4,
+    dataset=dict(
+        type='DistributedRepeatingDataset',
+        name_mappings={
+            'observation.state': ['proprio'],
+            'action': ['action'],
+        },
+        statistic_keys=['observation.state', 'timestamp', 'action'],
+        datasets=dict(
+            basket=[
+                dict(
+                    type='ParquetDataset',
+                    data_root_path=  # noqa: E251
+                    [
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0518_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0521_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0522_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0525_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0526_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0527_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0601_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0602_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0603_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0604_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0605_basket_full_task_prompt_v4_V2.1',  # noqa: E501
+                    ],
+                    transforms=[
+                        dict(
+                            type='ProcessParquetInputs',
+                            parquet_keys=[
+                                'observation.state',
+                                'timestamp',
+                                'actions',
+                                'info',
+                                'stats',
+                                'action_masks',
+                            ],
+                            video_keys=[
+                                'observation.images.head',
+                                'observation.images.left_wrist',
+                            ],
+                            name_mappings={
+                                'observation.state': ['states'],
+                                'actions': ['actions'],
+                            },
+                            embodiment_id=0,
+                        ),
+                        dict(type='ParquetPrompter', use_conversation=False),
+                        dict(
+                            type='ProcessPrompts',
+                            tokenizer=dict(
+                                type='PretrainedTokenizer',
+                                model_path=_tokenizer,
+                            ),
+                            max_len=512,
+                        ),
+                        dict(type='ResizeImages', height=128, width=128),
+                        dict(type='SimpleNormalizeImages'),
+                        dict(
+                            type='NormalizeStatesAndActions',
+                            action_dim=64,
+                            state_dim=64,
+                            state_key='proprio',
+                            action_key='action',
+                            norm_type='mean_std',
+                        ),
+                        dict(
+                            type='PrepareVideo',
+                            num_views=2,
+                            frame_window_size=_frame_window_size,
+                        ),
+                    ],
+                    action_window_size=10,
+                    action_key='action',
+                    use_delta=False,
+                    window_start_idx=0,
+                    frame_window_size=_frame_window_size,
+                )
+            ],
+            candy=[
+                dict(
+                    type='ParquetDataset',
+                    data_root_path=  # noqa: E251
+                    [
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0528_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0529_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0601_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0602_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0603_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0604_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                        '/mnt/data/cpfs/users/jikun/vcube_data/0605_candy_full_task_prompt_v4_V2.1',  # noqa: E501
+                    ],
+                    transforms=[
+                        dict(
+                            type='ProcessParquetInputs',
+                            parquet_keys=[
+                                'observation.state',
+                                'timestamp',
+                                'actions',
+                                'info',
+                                'stats',
+                                'action_masks',
+                            ],
+                            video_keys=[
+                                'observation.images.head',
+                                'observation.images.left_wrist',
+                            ],
+                            name_mappings={
+                                'observation.state': ['states'],
+                                'actions': ['actions'],
+                            },
+                            embodiment_id=1,
+                        ),
+                        dict(type='ParquetPrompter', use_conversation=False),
+                        dict(
+                            type='ProcessPrompts',
+                            tokenizer=dict(
+                                type='PretrainedTokenizer',
+                                model_path=_tokenizer,
+                            ),
+                            max_len=512,
+                        ),
+                        dict(type='ResizeImages', height=128, width=128),
+                        dict(type='SimpleNormalizeImages'),
+                        dict(
+                            type='NormalizeStatesAndActions',
+                            action_dim=64,
+                            state_dim=64,
+                            state_key='proprio',
+                            action_key='action',
+                            norm_type='mean_std',
+                        ),
+                        dict(
+                            type='PrepareVideo',
+                            num_views=2,
+                            frame_window_size=_frame_window_size,
+                        ),
+                    ],
+                    action_window_size=10,
+                    action_key='action',
+                    use_delta=False,
+                    window_start_idx=0,
+                    frame_window_size=_frame_window_size,
+                )
+            ],
+        ),
+    ),
+)
+
+runner = dict(
+    type='FSDPTrainRunner',
+    max_epochs=20,
+    learning_rate=1e-5,
+    weight_decay=1e-5,
+    max_grad_norm=1.0,
+    collator=dict(
+        type='DictCollator',
+        keys=[
+            'states',
+            'images',
+            'img_masks',
+            'actions',
+            'action_masks',
+            'embodiment_ids',
+            'frame_masks',
+            'lang_tokens',
+            'lang_masks',
+        ],
+        meta_keys=['task_description', 'prompt', 'info', 'stats', 'timestamp'],
+    ),
+    sampler=None,
+    metric=dict(
+        type='VLAMetric',
+        active_trackers=('jsonl', 'wandb'),
+        run_dir='work_dirs',
+        grad_accumulation_steps=1,
+        window_size=1,
+    ),
+    lr_scheduler_type='linear-warmup+cosine-decay',
+    warmup_ratio=0.05,
+    enable_gradient_checkpointing=True,
+    enable_mixed_precision_training=True,
+    mixed_precision_dtype='bf16',
+    sharding_strategy='full-shard',
+    change_key_name=False,
+)
