@@ -15,7 +15,11 @@
 _ckpt_root = './checkpoints'
 _tokenizer = _ckpt_root + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
 
-_frame_window_size = 9
+_frame_window_size = 33
+_action_horizon = 24
+_image_height = 240
+_image_width = 320
+_frame_seqlen = 600
 
 model = dict(
     type='DreamZeroVLA',
@@ -35,13 +39,13 @@ model = dict(
         type='DreamZeroHead',
         action_dim=52,
         max_action_dim=64,
-        action_horizon=10,
+        action_horizon=_action_horizon,
         max_state_dim=64,
         num_frames=_frame_window_size,
         num_frame_per_block=2,
-        num_action_per_block=10,
+        num_action_per_block=_action_horizon,
         num_state_per_block=1,
-        frame_seqlen=128,
+        frame_seqlen=_frame_seqlen,
         hidden_size=1024,
         input_embedding_dim=1536,
         dit_dim=5120,
@@ -58,7 +62,7 @@ model = dict(
         num_inference_steps=16,
         use_gradient_checkpointing=True,
         cfg_scale=1.0,
-        max_chunk_size=-1,
+        max_chunk_size=4,
     ),
     name_mapping={
         'vla_head.model': 'action_head.model',
@@ -69,7 +73,7 @@ model = dict(
 )
 
 train_dataloader = dict(
-    per_device_batch_size=2,
+    per_device_batch_size=1,
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -126,7 +130,10 @@ train_dataloader = dict(
                             ),
                             max_len=512,
                         ),
-                        dict(type='ResizeImages', height=128, width=128),
+                        dict(
+                            type='ResizeImages',
+                            height=_image_height,
+                            width=_image_width),
                         dict(type='SimpleNormalizeImages'),
                         dict(
                             type='NormalizeStatesAndActions',
@@ -142,7 +149,7 @@ train_dataloader = dict(
                             frame_window_size=_frame_window_size,
                         ),
                     ],
-                    action_window_size=10,
+                    action_window_size=_action_horizon,
                     action_key='action',
                     use_delta=False,
                     window_start_idx=0,
@@ -192,7 +199,10 @@ train_dataloader = dict(
                             ),
                             max_len=512,
                         ),
-                        dict(type='ResizeImages', height=128, width=128),
+                        dict(
+                            type='ResizeImages',
+                            height=_image_height,
+                            width=_image_width),
                         dict(type='SimpleNormalizeImages'),
                         dict(
                             type='NormalizeStatesAndActions',
@@ -208,7 +218,7 @@ train_dataloader = dict(
                             frame_window_size=_frame_window_size,
                         ),
                     ],
-                    action_window_size=10,
+                    action_window_size=_action_horizon,
                     action_key='action',
                     use_delta=False,
                     window_start_idx=0,
@@ -221,7 +231,7 @@ train_dataloader = dict(
 
 runner = dict(
     type='FSDPTrainRunner',
-    max_epochs=20,
+    max_epochs=2,
     learning_rate=1e-5,
     weight_decay=1e-5,
     max_grad_norm=1.0,
