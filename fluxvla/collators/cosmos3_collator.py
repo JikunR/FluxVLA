@@ -30,7 +30,7 @@ from fluxvla.engines import COLLATORS
 
 
 @COLLATORS.register_module()
-class Cosmos3NanoCollator:
+class Cosmos3Collator:
     """Collate function for Cosmos3-Nano training batches.
 
     Args:
@@ -42,6 +42,8 @@ class Cosmos3NanoCollator:
             the batch with ``pad_id`` and stacked.
         list_keys (List[str]): Keys whose values should be collected into a
             plain Python list (e.g., ``sequence_plan``, ``task_description``).
+            Defaults to ``['sequence_plan']`` because ``SequencePlan`` is a
+            dataclass that cannot be stacked by the auto-detect fallback.
         meta_keys (List[str]): Alias for ``list_keys`` – kept for API
             consistency with ``DictCollator``.
         pad_id (int): Padding token ID used for ``sequence_keys``.
@@ -58,8 +60,10 @@ class Cosmos3NanoCollator:
     ) -> None:
         self.tensor_keys: List[str] = tensor_keys or []
         self.sequence_keys: List[str] = sequence_keys or ['text_token_ids']
+        # sequence_plan is a non-stackable dataclass; always keep as list.
+        default_list_keys = ['sequence_plan']
         self.list_keys: List[str] = list(
-            set((list_keys or []) + (meta_keys or [])))
+            set(default_list_keys + (list_keys or []) + (meta_keys or [])))
         self.pad_id = pad_id
 
     # ------------------------------------------------------------------
@@ -82,7 +86,7 @@ class Cosmos3NanoCollator:
                     collated[key] = torch.stack(values)
                 else:
                     raise TypeError(
-                        f"Cosmos3NanoCollator: key '{key}' is in tensor_keys "
+                        f"Cosmos3Collator: key '{key}' is in tensor_keys "
                         f'but got unsupported type {type(first).__name__}')
 
             elif key in self.sequence_keys:

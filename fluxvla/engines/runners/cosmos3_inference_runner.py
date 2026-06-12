@@ -14,9 +14,9 @@
 """Inference runner and inference dataset for Cosmos3-Nano VLA.
 
 Follows the same pattern as ``AlohaInferenceRunner`` /
-``PrivateInferenceDataset``, but builds inputs for ``Cosmos3NanoVLA``.
+``PrivateInferenceDataset``, but builds inputs for ``Cosmos3VLA``.
 
-Weight loading differs from other VLAs because Cosmos3NanoVLA splits
+Weight loading differs from other VLAs because Cosmos3VLA splits
 initialization into two steps:
 
 1. ``build_vla_from_cfg`` → ``__init__``: builds tokenizer + schedulers only;
@@ -24,7 +24,7 @@ initialization into two steps:
 2. ``vla.from_pretrained()``: loads the HF backbone (``net``) and VAE.
 3. *(optional)* load a FluxVLA finetune checkpoint on top of ``net``.
 
-``Cosmos3NanoInferenceRunner.run_setup`` handles all three steps.
+``Cosmos3InferenceRunner.run_setup`` handles all three steps.
 """
 
 from __future__ import annotations
@@ -44,13 +44,13 @@ from .base_inference_runner import BaseInferenceRunner
 overwatch = initialize_overwatch(__name__)
 
 # ---------------------------------------------------------------------------
-# Cosmos3NanoInferenceDataset
+# Cosmos3InferenceDataset
 # ---------------------------------------------------------------------------
 
 
 @DATASETS.register_module()
-class Cosmos3NanoInferenceDataset:
-    """Preprocess a single real-robot observation for ``Cosmos3NanoVLA``.
+class Cosmos3InferenceDataset:
+    """Preprocess a single real-robot observation for ``Cosmos3VLA``.
 
     Applies the same transform pipeline as training (resize → normalize →
     build_sequence), then assembles a ready-to-run batch dict with correct
@@ -64,7 +64,7 @@ class Cosmos3NanoInferenceDataset:
             Do NOT include PrepareVideo here — video assembly is done internally  # noqa: E501
             to match inference's single-frame input layout.
         qwen3_vl_model_path (str): Path to the Qwen3-VL checkpoint (for the
-            ``ProcessCosmos3NanoPrompt`` tokenizer).
+            ``ProcessCosmos3Prompt`` tokenizer).
         img_keys (List[str]): Image field names in the incoming observation.
         embodiment_id (int): Integer embodiment ID used in training.
         domain_id (int): Cosmos3 domain ID (e.g. 8 for droid_lerobot).
@@ -111,8 +111,7 @@ class Cosmos3NanoInferenceDataset:
         self.transforms: list = []
         for t_cfg in transforms:
             if t_cfg.get(
-                    'type'
-            ) == 'ProcessCosmos3NanoPrompt' and qwen3_vl_model_path:
+                    'type') == 'ProcessCosmos3Prompt' and qwen3_vl_model_path:
                 t_cfg = dict(t_cfg)
                 t_cfg.setdefault('qwen3_vl_model_path', qwen3_vl_model_path)
             self.transforms.append(build_transform_from_cfg(t_cfg))
@@ -128,7 +127,7 @@ class Cosmos3NanoInferenceDataset:
                 - ``'task_description'``: str
 
         Returns:
-            Dict suitable for ``Cosmos3NanoVLA.predict_action()``.
+            Dict suitable for ``Cosmos3VLA.predict_action()``.
             All tensors have a leading batch dimension of 1 and are on CUDA.
         """
         # ---- collect raw images per view ---------------------------------
@@ -142,7 +141,7 @@ class Cosmos3NanoInferenceDataset:
             for key in self.img_keys:
                 if key not in obs:
                     raise KeyError(
-                        f'Cosmos3NanoInferenceDataset: missing image key {key!r}'  # noqa: E501
+                        f'Cosmos3InferenceDataset: missing image key {key!r}'  # noqa: E501
                     )
                 img = obs[key]
                 if img.ndim == 3 and img.shape[-1] == 3:
@@ -204,12 +203,12 @@ class Cosmos3NanoInferenceDataset:
 
 
 # ---------------------------------------------------------------------------
-# Cosmos3NanoInferenceRunner
+# Cosmos3InferenceRunner
 # ---------------------------------------------------------------------------
 
 
 @RUNNERS.register_module()
-class Cosmos3NanoInferenceRunner(BaseInferenceRunner):
+class Cosmos3InferenceRunner(BaseInferenceRunner):
     """Real-robot inference runner for Cosmos3-Nano VLA.
 
     Follows the ``AlohaInferenceRunner`` structure:
@@ -238,7 +237,7 @@ class Cosmos3NanoInferenceRunner(BaseInferenceRunner):
         # Pass action_chunk so BaseInferenceRunner slices correctly.
         kwargs.setdefault('action_chunk', action_horizon)
 
-        # Cosmos3NanoVLA does NOT go through the BaseInferenceRunner
+        # Cosmos3VLA does NOT go through the BaseInferenceRunner
         # ckpt_path + load_state_dict path (net is None at __init__ time).
         # Stash ckpt_path before calling super().__init__ so we can handle
         # it ourselves in run_setup().
@@ -259,14 +258,13 @@ class Cosmos3NanoInferenceRunner(BaseInferenceRunner):
         import torch
 
         # Step 1: load HF backbone + frozen VAE
-        overwatch.info(
-            '[Cosmos3NanoInferenceRunner] Loading backbone weights…')
+        overwatch.info('[Cosmos3InferenceRunner] Loading backbone weights…')
         self.vla.from_pretrained()
 
         # Step 2: overlay a FluxVLA finetune checkpoint if provided
         if self._cosmos3_ckpt_path is not None:
             overwatch.info(
-                f'[Cosmos3NanoInferenceRunner] Loading finetune checkpoint: '
+                f'[Cosmos3InferenceRunner] Loading finetune checkpoint: '
                 f'{self._cosmos3_ckpt_path}')
             from safetensors.torch import load_file as st_load
             ckpt = self._cosmos3_ckpt_path
@@ -293,10 +291,10 @@ class Cosmos3NanoInferenceRunner(BaseInferenceRunner):
                     net_weights, strict=False)
                 if missing:
                     overwatch.warning(
-                        f'[Cosmos3NanoInferenceRunner] {len(missing)} missing '
+                        f'[Cosmos3InferenceRunner] {len(missing)} missing '
                         f'keys in finetune checkpoint')
                 overwatch.info(
-                    f'[Cosmos3NanoInferenceRunner] Finetune checkpoint loaded '
+                    f'[Cosmos3InferenceRunner] Finetune checkpoint loaded '
                     f'({len(net_weights)} tensors)')
 
         # Step 3: configure for inference
@@ -310,14 +308,14 @@ class Cosmos3NanoInferenceRunner(BaseInferenceRunner):
                                                       'cuda'):
             self.vla.vae.model.cuda()
 
-        overwatch.info('[Cosmos3NanoInferenceRunner] Model ready.')
+        overwatch.info('[Cosmos3InferenceRunner] Model ready.')
 
     # ------------------------------------------------------------------
     # BaseInferenceRunner hooks
     # ------------------------------------------------------------------
 
     def _predict_action(self, inputs: Dict) -> np.ndarray:
-        """Run ``Cosmos3NanoVLA.predict_action`` and return raw numpy actions."""  # noqa: E501
+        """Run ``Cosmos3VLA.predict_action`` and return raw numpy actions."""  # noqa: E501
         action_horizon = inputs.pop('action_horizon', self.action_horizon)
         with torch.inference_mode():
             actions = self.vla.predict_action(

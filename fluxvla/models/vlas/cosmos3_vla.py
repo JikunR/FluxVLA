@@ -20,9 +20,10 @@ infrastructure.
 Key differences from DreamZeroVLA / LlavaVLA:
 * There is no separate VLM backbone + action head split.  The entire
   Qwen3-VL-8B MoT network handles both understanding and generation.
-* Video is encoded by a Wan2.2 VAE **inside the forward pass** (not in the
-  dataset pipeline) so that gradients flow through the VAE if needed and so
-  that the dataset only needs to ship raw RGB frames.
+* Video is encoded by a **frozen** Wan2.2 VAE inside the forward pass (not in
+  the dataset pipeline) so that the dataset only needs to ship raw RGB frames.
+  The VAE is always run under ``torch.no_grad()`` — gradients do *not* flow
+  through the encoder.
 * Actions and video latents are jointly denoised via Rectified Flow (flow
   matching) through the same Transformer.
 * Sequence packing (``PackedSequence``) is built in ``forward()`` using the
@@ -48,7 +49,7 @@ Data contract (keys expected from the DataLoader / collator):
     images         – ``[B, C, T, H_tiles, W]`` float32 in ``[-1, 1]`` as
                      prepared by ``PrepareVideo`` + ``SimpleNormalizeImages``.
     text_token_ids – ``[B, L]`` int64 token IDs from
-                     ``ProcessCosmos3NanoPrompt``.
+                     ``ProcessCosmos3Prompt``.
     actions        – ``[B, T_act, max_action_dim]`` float32, already padded.
     domain_id      – ``[B]`` int64 cosmos3 embodiment domain IDs.
     raw_action_dim – ``[B]`` int64 unpadded action dimensionality (for loss
@@ -75,7 +76,7 @@ overwatch = initialize_overwatch(__name__)
 
 
 @VLAS.register_module()
-class Cosmos3NanoVLA(BaseVLA):
+class Cosmos3VLA(BaseVLA):
     """Cosmos3-Nano Vision-Language-Action model.
 
     Wraps ``Cosmos3VFMNetwork`` (Qwen3-VL-8B MoT) + Wan2.2 VAE from the
@@ -127,6 +128,7 @@ class Cosmos3NanoVLA(BaseVLA):
     def __init__(
         self,
         pretrained_name_or_path: str,
+        backbone_path: Optional[str] = None,
         vae_path: Optional[str] = None,
         max_action_dim: int = 64,
         action_loss_weight: float = 10.0,
@@ -151,9 +153,15 @@ class Cosmos3NanoVLA(BaseVLA):
 
         # ---- paths -------------------------------------------------------
         self.pretrained_name_or_path = pretrained_name_or_path
+        # backbone_path: the HF model directory used to build the network
+        # architecture.  Defaults to pretrained_name_or_path when that path
+        # IS the HF backbone; must be set explicitly when resuming from a
+        # FluxVLA work-dir checkpoint (where pretrained_name_or_path points
+        # to the checkpoint dir / .safetensors file, not the HF backbone).
+        self._backbone_path: str = backbone_path or pretrained_name_or_path
         # _vae_path is resolved once; defaults to <backbone>/tokenizer/
         self._vae_path: str = (
-            vae_path or os.path.join(pretrained_name_or_path, 'tokenizer'))
+            vae_path or os.path.join(self._backbone_path, 'tokenizer'))
         # BaseVLA.from_pretrained() reads this when doing resume
         self.name_mapping = name_mapping
         self.strict_mapping = strict_mapping
@@ -185,7 +193,7 @@ class Cosmos3NanoVLA(BaseVLA):
 
         # ---- lightweight setup -------------------------------------------
         # Tokenizer is small (~100 MB vocab embeddings) and needed by
-        # ProcessCosmos3NanoPrompt in the dataset workers, so we initialise
+        # ProcessCosmos3Prompt in the dataset workers, so we initialise
         # it here (no gradient tensors).
         self._setup_tokenizer()
         self._setup_schedulers()
@@ -263,12 +271,12 @@ class Cosmos3NanoVLA(BaseVLA):
 
         **Resume** (``self.pretrained_name_or_path`` points to a
         ``.safetensors`` file or a FluxVLA work-dir checkpoint directory):
-            Loads only ``self.net``'s weights via the safetensors loader,
-            optionally applying ``self.name_mapping`` for key remapping.
-            This matches the behaviour of ``BaseVLA.from_pretrained``.
-
-        In both cases the VAE is loaded from ``self._vae_path`` because it
-        is frozen and not included in FluxVLA training checkpoints.
+            Builds network architecture from ``self._backbone_path`` (the
+            original HF backbone directory), then overlays the resume weights
+            via the safetensors loader.  ``backbone_path`` must be set in the
+            config when resuming.
+            The VAE is still constructed from ``vae_path`` because it is
+            frozen and not included in FluxVLA training checkpoints.
         """
         self._load_network()
         self._load_vae()
@@ -287,27 +295,35 @@ class Cosmos3NanoVLA(BaseVLA):
         is_resume_dir = os.path.isdir(path) and not is_hf_backbone
 
         if is_hf_backbone:
-            overwatch.info(f'[Cosmos3NanoVLA] Loading backbone from {path}')
+            overwatch.info(f'[Cosmos3VLA] Loading backbone from {path}')
             self.net: Cosmos3VFMNetwork = Cosmos3VFMNetwork.from_pretrained(
                 path)
             self.net_config: Cosmos3VFMNetworkConfig = self.net.config
 
         elif is_safetensors_file or is_resume_dir:
             # Resume path: net architecture must be instantiated first from
-            # config, then weights are loaded via safetensors.
-            # We expect either a standalone .safetensors file or a work-dir
-            # directory that contains one or more .safetensors shards.
+            # the original HF backbone (self._backbone_path), then weights
+            # are overlaid from the checkpoint.
+            # self._backbone_path defaults to pretrained_name_or_path for the
+            # initial-load case; for resume it must be set via backbone_path.
+            backbone = self._backbone_path
             overwatch.info(
-                f'[Cosmos3NanoVLA] Resume: building network from backbone '
-                f'config at {path}')
+                f'[Cosmos3VLA] Resume: building network architecture '
+                f'from backbone at {backbone}')
+            if not (os.path.isdir(backbone)
+                    and os.path.exists(os.path.join(backbone, 'config.json'))):
+                raise ValueError(
+                    f'[Cosmos3VLA] Resume requires a valid HuggingFace '
+                    f'backbone directory with config.json.  '
+                    f'Got: {backbone!r}. '
+                    f'Set backbone_path in your config to the original HF '
+                    f'backbone directory.')
             # Build the empty network from config (no weight download)
-            self.net = Cosmos3VFMNetwork.from_pretrained(
-                self.pretrained_name_or_path)
+            self.net = Cosmos3VFMNetwork.from_pretrained(backbone)
             self.net_config = self.net.config
 
             # Now overlay the resume weights
-            overwatch.info(
-                f'[Cosmos3NanoVLA] Resume: loading weights from {path}')
+            overwatch.info(f'[Cosmos3VLA] Resume: loading weights from {path}')
             if is_safetensors_file:
                 resume_weights = load_file(path, device='cpu')
             else:
@@ -332,15 +348,15 @@ class Cosmos3NanoVLA(BaseVLA):
                 stripped, strict=self.strict_mapping)
             if missing:
                 overwatch.warning(
-                    f'[Cosmos3NanoVLA] Resume: {len(missing)} missing keys')
+                    f'[Cosmos3VLA] Resume: {len(missing)} missing keys')
             if unexpected:
                 overwatch.warning(
-                    f'[Cosmos3NanoVLA] Resume: {len(unexpected)} unexpected keys'  # noqa: E501
+                    f'[Cosmos3VLA] Resume: {len(unexpected)} unexpected keys'  # noqa: E501
                 )
 
         else:
             raise ValueError(
-                f'[Cosmos3NanoVLA] Cannot determine load mode for '
+                f'[Cosmos3VLA] Cannot determine load mode for '
                 f'pretrained_name_or_path={path!r}.  '
                 f'Expected either a HuggingFace model directory (with '
                 f'config.json) or a .safetensors file / work-dir directory.')
@@ -351,7 +367,7 @@ class Cosmos3NanoVLA(BaseVLA):
             Wan2pt2VAEInterface
 
         vae_path = self._vae_path
-        overwatch.info(f'[Cosmos3NanoVLA] Loading VAE from {vae_path}')
+        overwatch.info(f'[Cosmos3VLA] Loading VAE from {vae_path}')
 
         # Wan2pt2VAEInterface expects vae_path to be the .pth weight file or
         # the directory containing it.  Resolve to the .pth file if a
@@ -362,7 +378,7 @@ class Cosmos3NanoVLA(BaseVLA):
             ]
             if not candidates:
                 raise FileNotFoundError(
-                    f'[Cosmos3NanoVLA] No .pth file found in VAE directory: {vae_path}'  # noqa: E501
+                    f'[Cosmos3VLA] No .pth file found in VAE directory: {vae_path}'  # noqa: E501
                 )
             vae_file = os.path.join(vae_path, candidates[0])
         else:
@@ -499,11 +515,6 @@ class Cosmos3NanoVLA(BaseVLA):
         from _c3.model.vfm.utils.data_and_condition import GenerationDataNoised
 
         tensor_kwargs = {'device': device, 'dtype': precision}
-        # fp32 kwargs reserved for future loss computation
-        tensor_kwargs_fp32 = {  # noqa: F841
-            'device': device,
-            'dtype': torch.float32
-        }
 
         # --- Vision ---
         x0_vis = gen_data_clean.x0_tokens_vision  # list[C,T,H,W]
@@ -649,7 +660,7 @@ class Cosmos3NanoVLA(BaseVLA):
                 ]
             except ImportError:
                 raise RuntimeError(
-                    'cosmos-framework must be installed for Cosmos3NanoVLA.forward().'  # noqa: E501
+                    'cosmos-framework must be installed for Cosmos3VLA.forward().'  # noqa: E501
                 )
 
         # ------------------------------------------------------------------
@@ -683,8 +694,10 @@ class Cosmos3NanoVLA(BaseVLA):
         if self.independent_action_schedule and x0_action:
             timesteps_action, sigmas_action = self._sample_timesteps(
                 B, self.rectified_flow_action, device)  # [B, 1]
+            _independent_action_schedule = True
         else:
             timesteps_action, sigmas_action = timesteps_vision, sigmas_vision
+            _independent_action_schedule = False
 
         # ------------------------------------------------------------------
         # 7. Pack sequence (clean tokens at this point)
@@ -707,7 +720,7 @@ class Cosmos3NanoVLA(BaseVLA):
         )
 
         # Overwrite action timesteps if independent schedule
-        if sigmas_action is not timesteps_vision and packed_seq.action is not None:  # noqa: E501
+        if _independent_action_schedule and packed_seq.action is not None:  # noqa: E501
             act_has_noisy = any(
                 nfi.numel() > 0
                 for nfi in packed_seq.action.noisy_frame_indexes)
@@ -726,7 +739,7 @@ class Cosmos3NanoVLA(BaseVLA):
             packed_sequence=packed_seq,
             sigmas_vision=sigmas_vision,
             sigmas_action=sigmas_action
-            if sigmas_action is not sigmas_vision else None,
+            if _independent_action_schedule else None,
             precision=precision,
             device=device,
         )
@@ -941,12 +954,22 @@ class Cosmos3NanoVLA(BaseVLA):
                     dt = sigma_curr - sigma_next
                     current_actions[i] = current_actions[i] - pred_v * dt
 
-        # Stack and slice to true action dim
+        # Stack and slice to per-sample true action dims
         actions_batch = torch.stack(
             current_actions, dim=0)  # [B, T_act, max_action_dim]
-        # Return only the valid action dimensions (use min raw_action_dim for safety)  # noqa: E501
-        min_rad = int(raw_action_dim.min().item())
-        return actions_batch[:, :, :min_rad]
+        # Slice each sample to its own raw_action_dim to avoid cross-sample
+        # truncation when batch contains mixed embodiments.
+        rad_list = [int(raw_action_dim[i].item()) for i in range(B)]
+        if len(set(rad_list)) == 1:
+            # All samples share the same action dim — single slice is safe
+            return actions_batch[:, :, :rad_list[0]]
+        # Mixed dims: return a list of [T_act, rad_i] tensors padded to max
+        max_rad = max(rad_list)
+        result = torch.zeros(
+            B, actions_batch.shape[1], max_rad, dtype=actions_batch.dtype)
+        for i, rad in enumerate(rad_list):
+            result[i, :, :rad] = actions_batch[i, :, :rad]
+        return result
 
     # ------------------------------------------------------------------
     # GenerationMixin required methods (no-op stubs)

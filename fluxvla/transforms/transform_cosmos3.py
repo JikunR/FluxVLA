@@ -15,11 +15,11 @@
 
 Two transforms:
 
-* ``ProcessCosmos3NanoPrompt`` — tokenise task description text with the
+* ``ProcessCosmos3Prompt`` — tokenise task description text with the
   Qwen3-VL chat template (text-only, no image placeholders).
-* ``BuildCosmos3NanoSequence`` — pad actions to ``max_action_dim``, attach
+* ``BuildCosmos3Sequence`` — pad actions to ``max_action_dim``, attach
   ``domain_id`` and ``raw_action_dim``, and build the ``SequencePlan`` expected
-  by ``Cosmos3NanoVLA.forward()``.
+  by ``Cosmos3VLA.forward()``.
 """
 
 from __future__ import annotations
@@ -32,12 +32,12 @@ import fluxvla.models.third_party_models.cosmos3 as _c3  # noqa: F401
 from fluxvla.engines import TRANSFORMS
 
 # ---------------------------------------------------------------------------
-# ProcessCosmos3NanoPrompt
+# ProcessCosmos3Prompt
 # ---------------------------------------------------------------------------
 
 
 @TRANSFORMS.register_module()
-class ProcessCosmos3NanoPrompt:
+class ProcessCosmos3Prompt:
     """Tokenise task description for Cosmos3-Nano using the Qwen3-VL chat
     template (pure text, no image/video placeholder tokens).
 
@@ -128,12 +128,12 @@ class ProcessCosmos3NanoPrompt:
 
 
 # ---------------------------------------------------------------------------
-# BuildCosmos3NanoSequence
+# BuildCosmos3Sequence
 # ---------------------------------------------------------------------------
 
 
 @TRANSFORMS.register_module()
-class BuildCosmos3NanoSequence:
+class BuildCosmos3Sequence:
     """Finalize cosmos3-nano-compatible batch fields.
 
     Responsibilities:

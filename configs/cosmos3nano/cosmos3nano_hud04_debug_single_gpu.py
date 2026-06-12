@@ -39,7 +39,7 @@ _image_height = 64
 _image_width = 64
 
 model = dict(
-    type='Cosmos3NanoVLA',
+    type='Cosmos3VLA',
     pretrained_name_or_path=_cosmos3_nano_ckpt,
     vae_path=_vae_path,
     max_action_dim=_max_action_dim,
@@ -95,7 +95,7 @@ train_dataloader = dict(
                         ),
                         dict(type='ParquetPrompter', use_conversation=False),
                         dict(
-                            type='ProcessCosmos3NanoPrompt',
+                            type='ProcessCosmos3Prompt',
                             qwen3_vl_model_path=_cosmos3_nano_ckpt,
                             max_len=256,  # shorter for debug
                         ),
@@ -114,7 +114,7 @@ train_dataloader = dict(
                             norm_type='mean_std',
                         ),
                         dict(
-                            type='BuildCosmos3NanoSequence',
+                            type='BuildCosmos3Sequence',
                             max_action_dim=_max_action_dim,
                             embodiment_to_domain_id={
                                 0: 8,
@@ -149,7 +149,7 @@ runner = dict(
     weight_decay=0.0,
     max_grad_norm=0.1,
     collator=dict(
-        type='Cosmos3NanoCollator',
+        type='Cosmos3Collator',
         tensor_keys=[
             'images',
             'actions',

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .cosmos3nano_collator import Cosmos3NanoCollator  # noqa: F401, F403
+from .cosmos3_collator import Cosmos3Collator  # noqa: F401, F403
 from .dict_collator import DictCollator  # noqa: F401, F403
 from .nested_collator import NestedCollator  # noqa: F401, F403
 from .padded_action_prediction_collator import \

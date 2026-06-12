@@ -30,6 +30,6 @@ except ImportError:
     pass
 
 try:
-    from .cosmos3nano_vla import Cosmos3NanoVLA  # noqa: F401
+    from .cosmos3_vla import Cosmos3VLA  # noqa: F401
 except ImportError:
     pass

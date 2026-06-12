@@ -21,7 +21,7 @@
 # Key design choices vs. DreamZero HUD04:
 # * Uses Cosmos3-Nano (Qwen3-VL-8B MoT) backbone instead of Wan2.1-14B DiT.
 # * Text prompts are tokenised by the Qwen3-VL tokenizer (plain-text,
-#   no image placeholders) via ProcessCosmos3NanoPrompt.
+#   no image placeholders) via ProcessCosmos3Prompt.
 # * Video is kept as raw RGB in [-1,1] (SimpleNormalizeImages) and encoded
 #   by the Wan2.2 VAE inside the model forward pass – not in the dataset.
 # * Actions and video are jointly denoised via Rectified Flow through the
@@ -46,7 +46,7 @@ _image_height = 256
 _image_width = 256  # each view; two views are stacked → 256×512 concat
 
 model = dict(
-    type='Cosmos3NanoVLA',
+    type='Cosmos3VLA',
     pretrained_name_or_path=_cosmos3_nano_ckpt,
     vae_path=_vae_path,
     max_action_dim=_max_action_dim,
@@ -85,7 +85,7 @@ _transforms_basket = [
     ),
     dict(type='ParquetPrompter', use_conversation=False),
     dict(
-        type='ProcessCosmos3NanoPrompt',
+        type='ProcessCosmos3Prompt',
         qwen3_vl_model_path=_cosmos3_nano_ckpt,
         max_len=4096,
     ),
@@ -102,7 +102,7 @@ _transforms_basket = [
         norm_type='mean_std',
     ),
     dict(
-        type='BuildCosmos3NanoSequence',
+        type='BuildCosmos3Sequence',
         max_action_dim=_max_action_dim,
         # basket=0, candy=1 → both map to droid_lerobot domain 8
         embodiment_to_domain_id={
@@ -144,7 +144,7 @@ _transforms_candy = [
     ),
     dict(type='ParquetPrompter', use_conversation=False),
     dict(
-        type='ProcessCosmos3NanoPrompt',
+        type='ProcessCosmos3Prompt',
         qwen3_vl_model_path=_cosmos3_nano_ckpt,
         max_len=4096,
     ),
@@ -159,7 +159,7 @@ _transforms_candy = [
         norm_type='mean_std',
     ),
     dict(
-        type='BuildCosmos3NanoSequence',
+        type='BuildCosmos3Sequence',
         max_action_dim=_max_action_dim,
         embodiment_to_domain_id={
             0: 8,
@@ -243,7 +243,7 @@ runner = dict(
     weight_decay=0.0,
     max_grad_norm=0.1,
     collator=dict(
-        type='Cosmos3NanoCollator',
+        type='Cosmos3Collator',
         tensor_keys=[
             'images',
             'actions',
@@ -274,7 +274,7 @@ runner = dict(
 )
 
 inference = dict(
-    type='Cosmos3NanoInferenceRunner',
+    type='Cosmos3InferenceRunner',
     seed=7,
     action_dim=_action_dim,
     action_horizon=_action_horizon,
@@ -291,7 +291,7 @@ inference = dict(
     },
     mixed_precision_dtype='bf16',
     dataset=dict(
-        type='Cosmos3NanoInferenceDataset',
+        type='Cosmos3InferenceDataset',
         norm_stats='',  # path to episodes_stats.jsonl or norm_stats.json
         qwen3_vl_model_path=_cosmos3_nano_ckpt,
         img_keys=['head', 'left_wrist'],
