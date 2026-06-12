@@ -28,3 +28,8 @@ try:
     from .dreamzero_vla import DreamZeroVLA  # noqa: F401
 except ImportError:
     pass
+
+try:
+    from .cosmos3nano_vla import Cosmos3NanoVLA  # noqa: F401
+except ImportError:
+    pass

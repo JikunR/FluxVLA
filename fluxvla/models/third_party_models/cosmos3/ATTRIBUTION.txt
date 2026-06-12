@@ -1,0 +1,22 @@
+Cosmos3 / cosmos-framework
+==========================
+
+Source: https://github.com/nvidia/cosmos-framework
+License: OpenMDW-1.1 (NVIDIA)
+Copyright: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Only the minimal set of files required by Cosmos3NanoVLA are included (69 source
+files, selected via BFS from the VLA entry-point imports). All internal imports
+have been rewritten from `cosmos_framework.*` to
+`fluxvla.models.third_party_models.cosmos3.*`.
+
+Included modules:
+  data/vfm/sequence_packing.py, utils.py
+  model/attention/           — PackedAttention, flash2/3/natten backends
+  model/vfm/mot/             — Cosmos3VFMNetwork, MoTDecoderLayer, unified_mot
+  model/vfm/tokenizers/      — Wan2pt2VAEInterface, VideoTokenizerInterface
+  model/vfm/utils/           — GenerationDataClean/Noised
+  model/vfm/algorithm/loss/  — flow_matching, time_weight
+  model/vfm/diffusion/       — RectifiedFlow, UniPCSampler
+  model/vfm/vlm/             — Qwen3VL, Nemotron3DenseVL configs
+  utils/                     — log, distributed, flags, easy_io, lazy_config, misc
