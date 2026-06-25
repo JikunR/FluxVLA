@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import os
 from typing import Dict, List, Optional
 
 import numpy as np
+import torch
 
 from fluxvla.engines import TRANSFORMS
 
@@ -359,6 +361,8 @@ class LiberoPromptFromInputs:
         max_len (int): Maximum token length.
         pad_token_id (int): Pad id to use if padding needed.
         prompt_suffix (str): Suffix appended after 'Out:'.
+        prompt_template (str): Optional format template used directly on the
+            task text. Supports ``{task}`` and ``{task_description}``.
     """
 
     def __init__(self,
@@ -369,7 +373,8 @@ class LiberoPromptFromInputs:
                  prompt_suffix: str = '',
                  use_conversation: bool = True,
                  negative_prompt: str = None,
-                 add_new_line: bool = False) -> None:
+                 add_new_line: bool = False,
+                 prompt_template: str = None) -> None:
         from fluxvla.engines import build_tokenizer_from_cfg
         if model_path is not None:
             tokenizer['model_path'] = os.path.join(model_path, 'tokenizer')
@@ -380,6 +385,7 @@ class LiberoPromptFromInputs:
         self.use_conversation = use_conversation
         self.negative_prompt = negative_prompt
         self.add_new_line = add_new_line
+        self.prompt_template = prompt_template
 
     def _tokenize_single_prompt(self, prompt: str):
         token_ids = self.tokenizer(prompt)['input_ids']
@@ -397,7 +403,12 @@ class LiberoPromptFromInputs:
     def __call__(self, inputs: Dict) -> Dict:
         assert 'task_description' in inputs, "inputs must contain 'task_description'"  # noqa: E501
         task_description = inputs['task_description']
-        if self.use_conversation:
+        if self.prompt_template is not None:
+            prompt = self.prompt_template.format(
+                task=task_description,
+                task_description=task_description,
+            )
+        elif self.use_conversation:
             prompt = ('In: What action should the robot take to ' +
                       str(task_description).lower() + '?\nOut:' +
                       self.prompt_suffix)
@@ -414,6 +425,78 @@ class LiberoPromptFromInputs:
 
         inputs['lang_tokens'] = np.asarray(tokens, dtype=np.int64)
         inputs['lang_masks'] = np.asarray(token_mask, dtype=np.bool_)
+        return inputs
+
+
+@TRANSFORMS.register_module()
+class LoadCachedTextEmbedding:
+    """Load a precomputed Wan/T5 text context from disk.
+
+    The cache format follows upstream FastWAM:
+    ``{sha256(prompt)}.t5_len{context_len}.{enc_id}.pt`` with a payload of
+    ``{"context": Tensor[L, D], "mask": BoolTensor[L]}``.
+    """
+
+    DEFAULT_PROMPT = (
+        "A video recorded from a robot's point of view executing the "
+        'following instruction: {task}')
+
+    def __init__(
+        self,
+        cache_dir: str,
+        context_len: int = 128,
+        enc_id: str = 'wan22ti2v5b',
+        prompt_template: Optional[str] = None,
+        task_key: str = 'task_description',
+    ) -> None:
+        self.cache_dir = os.path.expanduser(cache_dir)
+        self.context_len = int(context_len)
+        self.enc_id = enc_id
+        self.prompt_template = prompt_template or self.DEFAULT_PROMPT
+        self.task_key = task_key
+
+    def __call__(self, inputs: Dict) -> Dict:
+        assert self.task_key in inputs, (
+            f"inputs must contain '{self.task_key}'")
+        task = inputs[self.task_key]
+        if isinstance(task, np.ndarray):
+            task = task.item()
+        prompt = self.prompt_template.format(
+            task=task,
+            task_description=task,
+        )
+        hashed = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+        cache_path = os.path.join(
+            self.cache_dir,
+            f'{hashed}.t5_len{self.context_len}.{self.enc_id}.pt',
+        )
+        if not os.path.exists(cache_path):
+            raise FileNotFoundError(
+                f'Missing text embedding cache: {cache_path}. Run the '
+                'WAM text-embedding precompute first.')
+
+        payload = torch.load(cache_path, map_location='cpu')
+        context = payload['context']
+        context_mask = payload['mask'].bool()
+        if context.ndim != 2:
+            raise ValueError('Cached `context` must be 2D [L, D], got '
+                             f'{tuple(context.shape)} in {cache_path}')
+        if context_mask.ndim != 1:
+            raise ValueError('Cached `mask` must be 1D [L], got '
+                             f'{tuple(context_mask.shape)} in {cache_path}')
+        if context.shape[0] != self.context_len:
+            raise ValueError('Cached context_len mismatch: expected '
+                             f'{self.context_len}, got {context.shape[0]} '
+                             f'in {cache_path}')
+        if context_mask.shape[0] != self.context_len:
+            raise ValueError('Cached mask_len mismatch: expected '
+                             f'{self.context_len}, got '
+                             f'{context_mask.shape[0]} in {cache_path}')
+
+        context = context.clone()
+        context[~context_mask] = 0.0
+        inputs['context'] = context
+        inputs['context_mask'] = torch.ones_like(context_mask)
         return inputs
 
 

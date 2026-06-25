@@ -1189,7 +1189,9 @@ class PrepareVideo:
     """Reshape multi-view / temporal image arrays into the video layout
     expected by DreamZero: ``[C, T, H_tiled, W]`` (per sample, no batch dim).
 
-    Camera views are tiled *vertically* (view-0 on top, view-1 on bottom).
+    Camera views are tiled vertically by default (view-0 on top, view-1 on
+    bottom). WAM can request horizontal tiling for Wan-style wide frames, or
+    ``robotwin`` tiling for three-camera ALOHA / RobotWin videos.
 
     This transform should be placed **after** ``SimpleNormalizeImages`` (or any
     other pixel-level transform) so that the spatial content is final before
@@ -1203,10 +1205,58 @@ class PrepareVideo:
     def __init__(self,
                  num_views: int = 2,
                  frame_window_size: int = 1,
+                 tile_direction: str = 'vertical',
                  *args,
                  **kwargs):
+        assert tile_direction in ('vertical', 'horizontal', 'robotwin')
         self.num_views = num_views
         self.frame_window_size = frame_window_size
+        self.tile_direction = tile_direction
+
+    @staticmethod
+    def _resize_sequence_numpy(video: np.ndarray, height: int,
+                               width: int) -> np.ndarray:
+        resized_frames = []
+        for frame in video:
+            image = frame.transpose(1, 2, 0)
+            resized = cv2.resize(
+                image, (width, height), interpolation=cv2.INTER_LINEAR)
+            resized_frames.append(resized.transpose(2, 0, 1))
+        return np.stack(resized_frames, axis=0)
+
+    @staticmethod
+    def _resize_sequence_tensor(video: torch.Tensor, height: int,
+                                width: int) -> torch.Tensor:
+        if not torch.is_floating_point(video):
+            video = video.float()
+        return torch.nn.functional.interpolate(
+            video,
+            size=(height, width),
+            mode='bilinear',
+            align_corners=False,
+            antialias=True,
+        )
+
+    def _tile_robotwin(self, images, is_tensor: bool):
+        if images.shape[0] != 3:
+            raise ValueError(
+                "`tile_direction='robotwin'` requires exactly 3 views, "
+                f'got {images.shape[0]}.')
+
+        resize = (
+            self._resize_sequence_tensor
+            if is_tensor else self._resize_sequence_numpy)
+
+        cam_top = resize(images[0], 256, 320)
+        cam_left = resize(images[1], 128, 160)
+        cam_right = resize(images[2], 128, 160)
+        if is_tensor:
+            bottom = torch.cat([cam_left, cam_right], dim=-1)
+            tiled = torch.cat([cam_top, bottom], dim=-2)
+            return tiled.permute(1, 0, 2, 3).contiguous()
+        bottom = np.concatenate([cam_left, cam_right], axis=-1)
+        tiled = np.concatenate([cam_top, bottom], axis=-2)
+        return np.transpose(tiled, (1, 0, 2, 3))
 
     def __call__(self, data: dict):
         # Support both 'images' (training) and 'pixel_values' (eval) keys
@@ -1224,32 +1274,56 @@ class PrepareVideo:
         # Handle both numpy arrays and torch tensors
         is_tensor = isinstance(images, torch.Tensor)
 
+        if images.ndim == 5:
+            v, t, c, h, w = images.shape
+            if self.tile_direction == 'robotwin':
+                data[img_key] = self._tile_robotwin(images, is_tensor)
+                return data
+            if self.tile_direction == 'horizontal':
+                axes = (2, 1, 3, 0, 4)
+                out_shape = (c, t, h, v * w)
+            else:
+                axes = (2, 1, 0, 3, 4)
+                out_shape = (c, t, v * h, w)
+            if is_tensor:
+                images = images.permute(*axes).reshape(*out_shape)
+            else:
+                images = np.transpose(images, axes).reshape(*out_shape)
+            data[img_key] = images
+            return data
+
         if images.ndim == 3:
             # [V*T*C, H, W] or [C, H, W]
             channels, h, w = images.shape
             if channels > 3 and channels % 3 == 0:
                 n_items = channels // 3
-                if T > 1 and n_items == V * T:
-                    # [V*T*C, H, W] -> [V, T, 3, H, W] -> [3, T, V, H, W]
-                    #                                    -> [3, T, V*H, W]
+                if n_items == V * T:
                     images = images.reshape(V, T, 3, h, w)
-                    if is_tensor:
-                        images = images.permute(2, 1, 0, 3, 4)
+                    if self.tile_direction == 'robotwin':
+                        data[img_key] = self._tile_robotwin(images, is_tensor)
+                        return data
+                    if self.tile_direction == 'horizontal':
+                        axes = (2, 1, 3, 0, 4)
+                        out_shape = (3, T, h, V * w)
                     else:
-                        images = images.transpose(2, 1, 0, 3, 4)
-                    images = images.reshape(3, T, V * h, w)
+                        axes = (2, 1, 0, 3, 4)
+                        out_shape = (3, T, V * h, w)
+                    if is_tensor:
+                        images = images.permute(*axes)
+                    else:
+                        images = images.transpose(*axes)
+                    images = images.reshape(*out_shape)
                     data[img_key] = images
                     return data
-                # [V*C, H, W] single timestep multi-view -> [3, 1, V*H, W]
                 images = images.reshape(n_items, 3, h, w)
-                # tile vertically: concat along H
+                cat_dim = 2 if self.tile_direction == 'horizontal' else 1
                 if is_tensor:
                     tiled = torch.cat([images[i] for i in range(n_items)],
-                                      dim=1)  # [3, n*H, W]
-                    data[img_key] = tiled.unsqueeze(1)  # [3, 1, n*H, W]
+                                      dim=cat_dim)
+                    data[img_key] = tiled.unsqueeze(1)
                 else:
                     tiled = np.concatenate([images[i] for i in range(n_items)],
-                                           axis=1)  # [3, n*H, W]
+                                           axis=cat_dim)
                     data[img_key] = tiled[:, np.newaxis, :, :]
                 return data
             # [C, H, W] single view, single timestep -> [C, 1, H, W]

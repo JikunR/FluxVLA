@@ -23,3 +23,8 @@ try:
     from .dreamzero_head import DreamZeroHead  # noqa: F401
 except ImportError:
     pass
+
+try:
+    from .wam_head import WAMHead  # noqa: F401
+except ImportError:
+    pass

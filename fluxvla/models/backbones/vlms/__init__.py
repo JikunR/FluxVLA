@@ -23,3 +23,8 @@ try:
     from .wan_backbone import WanBackbone  # noqa: F401
 except ImportError:
     pass
+
+try:
+    from .wan22_text_backbone import Wan22TextBackbone  # noqa: F401
+except ImportError:
+    pass

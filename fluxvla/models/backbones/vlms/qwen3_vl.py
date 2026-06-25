@@ -18,8 +18,8 @@ from typing import Callable, Dict, Optional, Type, Union
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from transformers.models.qwen3_vl.modeling_qwen3_vl import \
-    Qwen3VLTextDecoderLayer
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    Qwen3VLTextDecoderLayer, Qwen3VLVisionBlock)
 
 from fluxvla.engines import VLM_BACKBONES
 from fluxvla.engines.utils.name_map import str_to_dtype
@@ -158,6 +158,69 @@ class Qwen3VL(VLMBackbone):
         grid_thw[:, 2] = grid_w
         return grid_thw
 
+    def _pack_raw_images_for_qwen3(
+            self, pixel_values: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.LongTensor]:
+        """Pack raw NCHW images into Qwen3-VL flattened patch tokens."""
+        if pixel_values.dim() != 4:
+            raise ValueError(
+                'qwen3_vl: raw image packing expects a 4D NCHW tensor, '
+                f'got shape {tuple(pixel_values.shape)}')
+
+        vc = self.vlm.model.visual.config
+        patch_size = getattr(vc, 'patch_size', 16)
+        temporal_patch_size = getattr(vc, 'temporal_patch_size', 2)
+        in_channels = getattr(vc, 'in_channels', 3)
+        merge_size = getattr(vc, 'spatial_merge_size', 2)
+        num_images, channels, height, width = pixel_values.shape
+        if channels != in_channels:
+            raise ValueError(
+                f'qwen3_vl: expected {in_channels} image channels, got '
+                f'{channels}.')
+        if height % patch_size != 0 or width % patch_size != 0:
+            raise ValueError(
+                'qwen3_vl: raw image height/width must be divisible by '
+                f'patch_size={patch_size}, got {(height, width)}.')
+        grid_h = height // patch_size
+        grid_w = width // patch_size
+        if grid_h % merge_size != 0 or grid_w % merge_size != 0:
+            raise ValueError(
+                'qwen3_vl: raw image patch grid must be divisible by '
+                f'spatial_merge_size={merge_size}, got {(grid_h, grid_w)}.')
+
+        images = pixel_values.unsqueeze(2).expand(num_images, channels,
+                                                  temporal_patch_size, height,
+                                                  width)
+        images = images.contiguous().reshape(
+            num_images,
+            channels,
+            temporal_patch_size,
+            grid_h,
+            patch_size,
+            grid_w,
+            patch_size,
+        )
+        patch_tokens = images.permute(0, 3, 5, 1, 2, 4, 6).contiguous()
+        patch_tokens = patch_tokens.view(
+            num_images, grid_h * grid_w,
+            channels * temporal_patch_size * patch_size * patch_size)
+        patch_tokens = patch_tokens.reshape(-1, patch_tokens.shape[-1])
+
+        grid_thw = torch.empty(
+            num_images, 3, dtype=torch.long, device=pixel_values.device)
+        grid_thw[:, 0] = 1
+        grid_thw[:, 1] = grid_h
+        grid_thw[:, 2] = grid_w
+        return patch_tokens, grid_thw
+
+    @staticmethod
+    def _flatten_image_grid_thw(
+            image_grid_thw: Optional[torch.LongTensor]) -> torch.LongTensor:
+        if image_grid_thw is None:
+            raise ValueError('qwen3_vl: image_grid_thw required when '
+                             'pixel_values are already flattened.')
+        return image_grid_thw.reshape(-1, 3)
+
     def forward(self,
                 images: torch.Tensor,
                 lang_tokens: torch.Tensor,
@@ -183,11 +246,17 @@ class Qwen3VL(VLMBackbone):
         pixel_values = images
         # In VLA mode, processor outputs may be flattened. In that case,
         # grid info must come from dataloader-provided image_grid_thw.
-        # For 4D/5D pixel_values, infer grid directly from tensor shape.
+        # For raw 4D/5D images, pack into the flattened patch format expected
+        # by Qwen3-VL's Conv3d patch embed.
         if pixel_values.dim() == 5:
-            pixel_values = pixel_values.view(-1, pixel_values.shape[2],
-                                             pixel_values.shape[3],
-                                             pixel_values.shape[4])
+            pixel_values = pixel_values.reshape(-1, pixel_values.shape[2],
+                                                pixel_values.shape[3],
+                                                pixel_values.shape[4])
+            pixel_values, image_grid_thw_flat = (
+                self._pack_raw_images_for_qwen3(pixel_values))
+        elif pixel_values.dim() == 4:
+            pixel_values, image_grid_thw_flat = (
+                self._pack_raw_images_for_qwen3(pixel_values))
         elif pixel_values.dim() == 3:
             # (B, H, W) raw spatial vs (B, num_patches, feat_dim) flattened
             vc = self.vlm.model.visual.config
@@ -197,20 +266,20 @@ class Qwen3VL(VLMBackbone):
                 getattr(vc, 'patch_size', 16)**2)
             if pixel_values.shape[-1] == patch_feat_dim:
                 pixel_values = pixel_values.reshape(-1, pixel_values.shape[-1])
+                image_grid_thw_flat = self._flatten_image_grid_thw(
+                    image_grid_thw)
             else:
                 pixel_values = pixel_values.unsqueeze(1).expand(
                     -1, 3, pixel_values.shape[1], pixel_values.shape[2])
-        pixel_values = pixel_values.contiguous()
-
-        if pixel_values.dim() in (4, 5):
-            image_grid_thw_flat = self._compute_qwen3_grid_thw(
-                pixel_values, batch_size, image_grid_thw)
+                pixel_values, image_grid_thw_flat = (
+                    self._pack_raw_images_for_qwen3(pixel_values))
+        elif pixel_values.dim() == 2:
+            image_grid_thw_flat = self._flatten_image_grid_thw(image_grid_thw)
         else:
-            if image_grid_thw is None:
-                raise ValueError('qwen3_vl: image_grid_thw required when '
-                                 'pixel_values are flattened (2D/3D).')
-            # HF expects (num_total_images, 3); collator may give (B,N,3).
-            image_grid_thw_flat = image_grid_thw.view(-1, 3)
+            raise ValueError(
+                f'qwen3_vl: pixel_values must be 2D/3D/4D/5D, got '
+                f'ndim={pixel_values.dim()}')
+        pixel_values = pixel_values.contiguous()
 
         # pooler_output: after vision merger (t*h*w -> t*h*w//merge^2);
         # get_image_features splits by (grid_thw.prod(-1)//merge_size^2).
@@ -316,8 +385,10 @@ class Qwen3VL(VLMBackbone):
             self.vlm.gradient_checkpointing_enable()
 
     def get_fsdp_wrapping_policy(self) -> Callable:
-        """Return FSDP wrapping policy for Qwen3VLTextDecoderLayer."""
+        """Return FSDP wrapping policy for Qwen3VL transformer blocks."""
         transformer_block_policy = partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls={Qwen3VLTextDecoderLayer})
+            transformer_layer_cls={
+                Qwen3VLTextDecoderLayer, Qwen3VLVisionBlock
+            })
         return transformer_block_policy

@@ -29,3 +29,8 @@ try:
     from .dreamzero_vla import DreamZeroVLA  # noqa: F401
 except ImportError:
     pass
+
+try:
+    from .wam_vla import WAMVLA  # noqa: F401
+except ImportError:
+    pass

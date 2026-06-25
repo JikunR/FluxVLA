@@ -576,7 +576,9 @@ class PrivateInferenceDataset:
         from fluxvla.engines import build_transform_from_cfg
         self.transforms = list()
         for transform in transforms:
-            transform['model_path'] = model_path
+            transform = dict(transform)
+            if transform.get('type') != 'LoadCachedTextEmbedding':
+                transform['model_path'] = model_path
             self.transforms.append(build_transform_from_cfg(transform))
         if isinstance(norm_stats, str):
             with open(norm_stats, 'r', encoding='utf-8') as f:
@@ -612,12 +614,21 @@ class PrivateInferenceDataset:
                 inputs['images']).unsqueeze(0).cuda(),  # noqa: E501
             img_masks=torch.tensor([[True for _ in range(len(self.img_keys))]
                                     ]).cuda(),  # noqa: E501
-            lang_tokens=torch.from_numpy(
-                inputs['lang_tokens']).unsqueeze(0).cuda(),
-            lang_masks=torch.from_numpy(
-                inputs['lang_masks']).unsqueeze(0).cuda(),
             states=torch.from_numpy(
                 inputs['states']).float().cuda().unsqueeze(0))
+        if 'context' in inputs or 'context_mask' in inputs:
+            if 'context' not in inputs or 'context_mask' not in inputs:
+                raise KeyError(
+                    '`context` and `context_mask` must be provided together.')
+            batch['context'] = torch.as_tensor(
+                inputs['context']).unsqueeze(0).cuda()
+            batch['context_mask'] = torch.as_tensor(
+                inputs['context_mask']).unsqueeze(0).cuda()
+        else:
+            batch['lang_tokens'] = torch.from_numpy(
+                inputs['lang_tokens']).unsqueeze(0).cuda()
+            batch['lang_masks'] = torch.from_numpy(
+                inputs['lang_masks']).unsqueeze(0).cuda()
         if self.embodiment_id is not None:
             batch['embodiment_ids'] = torch.from_numpy(
                 np.array(self.embodiment_id)).int().cuda().unsqueeze(0)

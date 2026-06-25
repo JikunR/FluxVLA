@@ -35,6 +35,7 @@ repos:
     rev: v2.2.1
     hooks:
       - id: codespell
+        args: ['--ignore-words-list=mot']
         exclude: 'fluxvla/models/third_party_models/'
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.9
