@@ -44,7 +44,8 @@ class ParquetDataset(Dataset):
                  train_episode_fraction: float = 1.0,
                  repeat_to_full_length: bool = False,
                  expose_index: bool = False,
-                 expected_dataset_version: Optional[str] = None) -> None:
+                 expected_dataset_version: Optional[str] = None,
+                 state_chunk_key: Optional[str] = None) -> None:
         """Initialize the Parquet dataset.
 
         Args:
@@ -92,6 +93,8 @@ class ParquetDataset(Dataset):
             expected_dataset_version (str, optional): Expected FluxVLA dataset
                 content version. If omitted, no version check is performed so
                 existing local datasets remain usable.
+            state_chunk_key (str, optional): Source key for an additional
+                future-state chunk window. If None, no extra field is added.
         """
         super().__init__()
         if not 0 < train_episode_fraction <= 1:
@@ -171,6 +174,7 @@ class ParquetDataset(Dataset):
         self.frame_window_size = frame_window_size
         self.frame_sample_stride = frame_sample_stride
         self.expose_index = expose_index
+        self.state_chunk_key = state_chunk_key
         for transform in transforms:
             self.transforms.append(build_transform_from_cfg(transform))
 
@@ -301,6 +305,49 @@ class ParquetDataset(Dataset):
                 == self.dataset[index]['episode_index']
                 and self._get_dataset_index(index) == dataset_idx)
 
+    def _build_temporal_window(self, index: int, dataset_idx: int,
+                               data: Dict[str, Any], source_key: str,
+                               window_start_idx: int, use_delta: bool):
+        values = list()
+        masks = list()
+        window_idx = window_start_idx
+        while len(values) < self.action_window_size:
+            value_index = index + window_idx
+            valid_window_index = self._same_episode_and_dataset(
+                value_index, dataset_idx, data)
+            value_task = (
+                self._get_task_name(dataset_idx, value_index)
+                if valid_window_index else None)
+            if valid_window_index and value_task not in ('empty', 'static'):
+                if use_delta:
+                    values.append(
+                        (np.array(self.dataset[value_index][source_key]) -
+                         np.array(self.dataset[value_index -
+                                               1][source_key])).tolist())
+                else:
+                    values.append(self.dataset[value_index][source_key])
+                masks.append(1)
+            elif value_task == 'empty':
+                fill_value = values[-1] if values else data[source_key]
+                for _ in range(self.action_window_size - len(values)):
+                    values.append(fill_value)
+                    masks.append(0)
+                break
+            elif value_task == 'static':
+                window_idx += 1
+                continue
+            else:
+                if len(values) > 0:
+                    values.append(values[-1])
+                else:
+                    values.append(data[source_key])
+                masks.append(0)
+            window_idx += 1
+        return (
+            np.array(values, dtype=np.float32),
+            np.array(masks, dtype=np.float32),
+        )
+
     def __getitem__(self, index, dataset_statistics):
         index = self._resolve_index(index)
         data = self.dataset[index]
@@ -311,40 +358,25 @@ class ParquetDataset(Dataset):
             data = self.dataset[index]
             # Recalculate dataset_idx
             dataset_idx = self._get_dataset_index(index)
-        actions = list()
-        action_masks = list()
-        window_idx = self.window_start_idx
-        while len(actions) < self.action_window_size:
-            action_index = index + window_idx
-            valid_window_index = self._same_episode_and_dataset(
-                action_index, dataset_idx, data)
-            action_task = (
-                self._get_task_name(dataset_idx, action_index)
-                if valid_window_index else None)
-            if valid_window_index and action_task not in ('empty', 'static'):
-                if self.use_delta:
-                    actions.append((
-                        np.array(self.dataset[action_index][self.action_key]) -
-                        np.array(self.dataset[action_index -
-                                              1][self.action_key])).tolist())
-                else:
-                    actions.append(self.dataset[action_index][self.action_key])
-                action_masks.append(1)
-            elif action_task == 'empty':
-                for _ in range(self.action_window_size - len(actions)):
-                    actions.append(actions[-1])
-                    action_masks.append(0)
-                break
-            elif action_task == 'static':
-                window_idx += 1
-                continue
-            else:
-                if len(actions) > 0:
-                    actions.append(actions[-1])
-                else:
-                    actions.append(data[self.action_key])
-                action_masks.append(0)
-            window_idx += 1
+        actions, action_masks = self._build_temporal_window(
+            index=index,
+            dataset_idx=dataset_idx,
+            data=data,
+            source_key=self.action_key,
+            window_start_idx=self.window_start_idx,
+            use_delta=self.use_delta,
+        )
+        if self.state_chunk_key is not None:
+            state_chunks, state_chunk_masks = self._build_temporal_window(
+                index=index,
+                dataset_idx=dataset_idx,
+                data=data,
+                source_key=self.state_chunk_key,
+                window_start_idx=1,
+                use_delta=False,
+            )
+            data['state_chunks'] = state_chunks
+            data['state_chunk_masks'] = state_chunk_masks
         # Collect forward-looking frame timestamps for video models
         if self.frame_window_size > 1:
             frame_timestamps = [data['timestamp']]

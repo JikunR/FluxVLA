@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 / VCube basket data with future state chunks as action targets.
+# WAM on HUD04 / VCube basket data with state chunks plus a state-to-action
+# teacher-forced decoder.
 
 import os
 
@@ -43,9 +44,9 @@ _basket_data_roots = [
 _action_dim = 64
 _proprio_dim = 64
 _action_horizon = 32
-_action_source_key = 'observation.state'
-_action_stats_key = 'proprio'
-_action_window_start_idx = 1
+_action_source_key = 'action'
+_state_chunk_source_key = 'observation.state'
+_action_window_start_idx = 0
 _frame_window_size = 9
 _frame_sample_stride = 4
 _statistic_name = 'hud04_vcube'
@@ -67,6 +68,8 @@ def _vcube_pipeline(embodiment_id: int):
                 'info',
                 'stats',
                 'action_masks',
+                'state_chunks',
+                'state_chunk_masks',
             ],
             video_keys=[
                 'observation.images.head',
@@ -75,6 +78,8 @@ def _vcube_pipeline(embodiment_id: int):
             name_mappings={
                 'observation.state': ['states'],
                 'actions': ['actions'],
+                'state_chunks': ['state_chunks'],
+                'state_chunk_masks': ['state_chunk_masks'],
             },
             embodiment_id=embodiment_id,
         ),
@@ -94,8 +99,9 @@ def _vcube_pipeline(embodiment_id: int):
             action_dim=_action_dim,
             state_dim=_proprio_dim,
             state_key='proprio',
-            action_key=_action_stats_key,
+            action_key='action',
             norm_type='mean_std',
+            state_chunk_key='state_chunks',
         ),
         dict(
             type='PrepareVideo',
@@ -125,6 +131,7 @@ def _vcube_dataset(data_roots, embodiment_id: int):
         window_start_idx=_action_window_start_idx,
         frame_window_size=_frame_window_size,
         frame_sample_stride=_frame_sample_stride,
+        state_chunk_key=_state_chunk_source_key,
     )
 
 
@@ -142,7 +149,8 @@ model = dict(
         checkpoint_root=_wan_checkpoint_root,
     ),
     vla_head=dict(
-        type='WAMHead',
+        type='WAMStateChunkHead',
+        action_dim=_action_dim,
         video_expert=dict(
             type='WanVideoDiT',
             checkpoint_root=_wan_checkpoint_root,
@@ -166,17 +174,17 @@ model = dict(
                 fuse_vae_embedding_in_latents=True,
                 video_attention_mask_mode='first_frame_causal',
                 action_conditioned=False,
-                action_dim=_action_dim,
+                action_dim=_proprio_dim,
                 action_group_causal_mask_mode='group_diagonal',
                 use_gradient_checkpointing=True,
             ),
         ),
-        action_expert=dict(
+        state_expert=dict(
             type='ActionDiT',
             pretrained_path=_action_dit,
             skip_load_from_pretrain=False,
             config=dict(
-                action_dim=_action_dim,
+                action_dim=_proprio_dim,
                 hidden_dim=1024,
                 ffn_dim=4096,
                 num_heads=24,
@@ -188,6 +196,17 @@ model = dict(
                 use_gradient_checkpointing=True,
             ),
         ),
+        action_decoder=dict(
+            type='StateToActionDecoder',
+            state_dim=_proprio_dim,
+            action_dim=_action_dim,
+            hidden_dim=1024,
+            ffn_dim=4096,
+            num_layers=4,
+            num_heads=8,
+            dropout=0.0,
+            max_num_embodiments=32,
+        ),
         video_scheduler=dict(
             train_shift=5.0, infer_shift=5.0, num_train_timesteps=1000),
         action_scheduler=dict(
@@ -196,10 +215,11 @@ model = dict(
             lambda_video=0.0,
             lambda_action=0.0,
             lambda_forward_video=1.0,
-            lambda_idm_action=1.0,
-            lambda_policy_action=1.0,
+            lambda_idm_state=1.0,
+            lambda_policy_state=1.0,
             lambda_joint_video=0.0,
-            lambda_joint_action=0.0,
+            lambda_joint_state=0.0,
+            lambda_state_to_action=1.0,
         ),
         video_cond_noise_prob=0.5,
     ),
@@ -250,6 +270,8 @@ runner = dict(
             'img_masks',
             'actions',
             'action_masks',
+            'state_chunks',
+            'state_chunk_masks',
             'embodiment_ids',
             'frame_masks',
             'context',

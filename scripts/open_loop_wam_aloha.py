@@ -258,12 +258,16 @@ def sample_to_inputs(sample: Dict):
         input_image=batch_tensor(sample['images'][:, 0], dtype=torch.float32),
         gt_frames=normalized_video_to_frames(sample['images']),
         gt_action=torch.as_tensor(sample['actions'], dtype=torch.float32),
+        gt_state_chunk=None,
         proprio=torch.as_tensor(sample['states'], dtype=torch.float32),
         lang_tokens=None,
         lang_masks=None,
         context=None,
         context_mask=None,
     )
+    if sample.get('state_chunks') is not None:
+        inputs['gt_state_chunk'] = torch.as_tensor(
+            sample['state_chunks'], dtype=torch.float32)
     if sample.get('lang_tokens') is not None:
         inputs['lang_tokens'] = batch_tensor(
             sample['lang_tokens'], dtype=torch.long)
@@ -282,6 +286,40 @@ def sample_to_inputs(sample: Dict):
             context_mask = context_mask.unsqueeze(0)
         inputs['context_mask'] = context_mask
     return inputs
+
+
+def uses_state_chunk_stream(model) -> bool:
+    return hasattr(model.vla_head, 'predict_state_chunk')
+
+
+def predict_policy_outputs(model, inputs: Dict, args, condition: Dict,
+                           seed: int):
+    output = model.predict_action(
+        input_image=inputs['input_image'],
+        proprio=inputs['proprio'],
+        num_inference_steps=args.num_inference_steps,
+        seed=seed,
+        rand_device='cpu',
+        return_state_chunks=uses_state_chunk_stream(model),
+        **condition,
+    )
+    if uses_state_chunk_stream(model):
+        pred_action, pred_state_chunk = output
+        return (
+            pred_action[0].detach().cpu().float(),
+            pred_state_chunk[0].detach().cpu().float(),
+        )
+    return output[0].detach().cpu().float(), None
+
+
+def fdm_condition_action(inputs: Dict,
+                         pred_state_chunk: torch.Tensor = None,
+                         pred_action: torch.Tensor = None):
+    if pred_state_chunk is not None:
+        return pred_state_chunk
+    if inputs.get('gt_state_chunk') is not None:
+        return inputs['gt_state_chunk']
+    return pred_action if pred_action is not None else inputs['gt_action']
 
 
 def condition_kwargs(inputs: Dict):
@@ -330,7 +368,7 @@ def run_gt_action_forward_episode(args, cfg: Config, model, dataset,
         gt_frames.extend(inputs['gt_frames'][1:valid_policy_idx + 1])
 
         chunk = model.infer(
-            action=inputs['gt_action'],
+            action=fdm_condition_action(inputs),
             input_image=inputs['input_image'],
             num_frames=int(cfg._frame_window_size),
             proprio=inputs['proprio'],
@@ -428,16 +466,19 @@ def run_whole_episode(args, cfg: Config, model, dataset, flux_stats: Dict,
         inputs = sample_to_inputs(sample)
         policy_gt_frames.extend(inputs['gt_frames'][1:valid_policy_idx + 1])
 
-        pred_action = model.predict_action(
-            input_image=inputs['input_image'],
-            proprio=inputs['proprio'],
-            num_inference_steps=args.num_inference_steps,
+        pred_action, pred_state_chunk = predict_policy_outputs(
+            model,
+            inputs,
+            args,
+            condition_kwargs(inputs),
             seed=args.seed + policy_chunks,
-            rand_device='cpu',
-            **condition_kwargs(inputs),
-        )[0].detach().cpu().float()
+        )
         chunk = model.infer(
-            action=pred_action,
+            action=fdm_condition_action(
+                inputs,
+                pred_state_chunk=pred_state_chunk,
+                pred_action=pred_action,
+            ),
             input_image=inputs['input_image'],
             num_frames=int(cfg._frame_window_size),
             proprio=inputs['proprio'],
@@ -479,16 +520,22 @@ def run_whole_episode(args, cfg: Config, model, dataset, flux_stats: Dict,
         inputs = sample_to_inputs(sample)
         ar_gt_frames.extend(inputs['gt_frames'][1:valid_next_idx + 1])
 
-        chunk_action = model.predict_action(
-            input_image=current_image,
-            proprio=current_proprio,
-            num_inference_steps=args.num_inference_steps,
+        chunk_action, chunk_state_chunk = predict_policy_outputs(
+            model,
+            dict(
+                start_inputs,
+                input_image=current_image,
+                proprio=current_proprio),
+            args,
+            condition_kwargs(start_inputs),
             seed=args.seed + ar_chunks,
-            rand_device='cpu',
-            **condition_kwargs(start_inputs),
-        )[0].detach().cpu().float()
+        )
         chunk = model.infer(
-            action=chunk_action,
+            action=fdm_condition_action(
+                start_inputs,
+                pred_state_chunk=chunk_state_chunk,
+                pred_action=chunk_action,
+            ),
             input_image=current_image,
             num_frames=int(cfg._frame_window_size),
             proprio=current_proprio,
@@ -508,10 +555,13 @@ def run_whole_episode(args, cfg: Config, model, dataset, flux_stats: Dict,
 
         state_action_index = min(next_action_index,
                                  valid_next_idx * frame_sample_stride)
-        next_state = denormalize_action(
-            chunk_action[state_action_index].numpy(), flux_stats)
-        current_proprio = torch.from_numpy(
-            normalize_state(next_state, flux_stats)).float()
+        if chunk_state_chunk is not None:
+            current_proprio = chunk_state_chunk[state_action_index].float()
+        else:
+            next_state = denormalize_action(
+                chunk_action[state_action_index].numpy(), flux_stats)
+            current_proprio = torch.from_numpy(
+                normalize_state(next_state, flux_stats)).float()
 
         ar_chunks += 1
         cursor += ar_step_rows
@@ -677,16 +727,19 @@ def main():
         return
 
     t0 = time.time()
-    pred_action = model.predict_action(
-        input_image=input_image,
-        proprio=proprio,
-        num_inference_steps=args.num_inference_steps,
+    pred_action, pred_state_chunk = predict_policy_outputs(
+        model,
+        inputs,
+        args,
+        condition,
         seed=args.seed,
-        rand_device='cpu',
-        **condition,
-    )[0].detach().cpu().float()
+    )
     first_forward = model.infer(
-        action=pred_action,
+        action=fdm_condition_action(
+            inputs,
+            pred_state_chunk=pred_state_chunk,
+            pred_action=pred_action,
+        ),
         input_image=input_image,
         num_frames=int(cfg._frame_window_size),
         proprio=proprio,
@@ -719,20 +772,26 @@ def main():
     current_proprio = proprio
     for chunk_idx in range(args.rollout_chunks):
         chunk_seed = args.seed + chunk_idx
-        chunk_action = model.predict_action(
-            input_image=current_image,
-            proprio=current_proprio,
-            num_inference_steps=args.num_inference_steps,
+        chunk_action, chunk_state_chunk = predict_policy_outputs(
+            model,
+            dict(inputs, input_image=current_image, proprio=current_proprio),
+            args,
+            condition,
             seed=chunk_seed,
-            rand_device='cpu',
-            **condition,
-        )[0].detach().cpu().float()
-        next_state = denormalize_action(
-            chunk_action[next_action_index].numpy(), flux_stats)
-        next_proprio = torch.from_numpy(
-            normalize_state(next_state, flux_stats)).float()
+        )
+        if chunk_state_chunk is not None:
+            next_proprio = chunk_state_chunk[next_action_index].float()
+        else:
+            next_state = denormalize_action(
+                chunk_action[next_action_index].numpy(), flux_stats)
+            next_proprio = torch.from_numpy(
+                normalize_state(next_state, flux_stats)).float()
         chunk = model.infer(
-            action=chunk_action,
+            action=fdm_condition_action(
+                inputs,
+                pred_state_chunk=chunk_state_chunk,
+                pred_action=chunk_action,
+            ),
             input_image=current_image,
             num_frames=int(cfg._frame_window_size),
             proprio=current_proprio,

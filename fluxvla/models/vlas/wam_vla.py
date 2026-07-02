@@ -383,8 +383,11 @@ class WAMVLA(BaseVLA):
         states: Optional[torch.Tensor] = None,
         actions: Optional[torch.Tensor] = None,
         action_masks: Optional[torch.Tensor] = None,
+        state_chunks: Optional[torch.Tensor] = None,
+        state_chunk_masks: Optional[torch.Tensor] = None,
         frame_masks: Optional[torch.Tensor] = None,
         training_mode: Optional[torch.Tensor] = None,
+        embodiment_ids: Optional[torch.Tensor] = None,
         img_masks: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
@@ -431,6 +434,9 @@ class WAMVLA(BaseVLA):
         action_is_pad = None
         if action_masks is not None:
             action_is_pad = ~action_masks.to(dtype=torch.bool)
+        state_chunk_is_pad = None
+        if state_chunk_masks is not None:
+            state_chunk_is_pad = ~state_chunk_masks.to(dtype=torch.bool)
         image_is_pad = None
         if frame_masks is not None:
             image_is_pad = ~frame_masks.to(dtype=torch.bool)
@@ -444,6 +450,9 @@ class WAMVLA(BaseVLA):
             image_is_pad=image_is_pad,
             proprio=proprio,
             training_mode=training_mode,
+            state_chunks=state_chunks,
+            state_chunk_is_pad=state_chunk_is_pad,
+            embodiment_ids=embodiment_ids,
         )
 
     # ------------------------------------------------------------------
@@ -461,11 +470,13 @@ class WAMVLA(BaseVLA):
         lang_tokens: Optional[torch.Tensor] = None,
         lang_masks: Optional[torch.Tensor] = None,
         states: Optional[torch.Tensor] = None,
+        embodiment_ids: Optional[torch.Tensor] = None,
         num_inference_steps: int = 20,
         sigma_shift: Optional[float] = None,
         seed: Optional[int] = None,
         rand_device: str = 'cpu',
         tiled: bool = False,
+        return_state_chunks: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         if 'prompt' in kwargs:
@@ -544,17 +555,22 @@ class WAMVLA(BaseVLA):
                 num_frames=self.frame_window_size,
             )
 
-        return self.vla_head.predict_action(
+        predict_kwargs = dict(
             first_frame_latents=first_frame_latents,
             context=context,
             context_mask=context_mask,
             action_horizon=action_horizon,
             video_latent_shape=video_latent_shape,
+            proprio=proprio,
+            embodiment_ids=embodiment_ids,
             num_inference_steps=num_inference_steps,
             sigma_shift=sigma_shift,
             seed=seed,
             rand_device=rand_device,
         )
+        if return_state_chunks:
+            predict_kwargs['return_state_chunks'] = True
+        return self.vla_head.predict_action(**predict_kwargs)
 
     def _prepare_inference_context(
         self,

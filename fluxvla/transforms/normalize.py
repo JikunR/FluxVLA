@@ -344,6 +344,9 @@ class NormalizeStatesAndActions:
             that contains the state information.
         action_key (str | None): The key in the data dictionary
             that contains the action information. If None, actions are skipped.
+        state_chunk_key (str | None): Optional key for future state chunks.
+            When present, it is normalized and padded with the same state
+            statistics and dimensions as ``states``.
     """
 
     def __init__(self,
@@ -358,6 +361,7 @@ class NormalizeStatesAndActions:
                  action_norm_mask: List[bool] = None,
                  clip_norm: bool = False,
                  normalize_states: bool = True,
+                 state_chunk_key: Optional[str] = None,
                  *args,
                  **kwargs):
         self.state_key = state_key
@@ -370,6 +374,7 @@ class NormalizeStatesAndActions:
         self.state_dim = state_dim
         self.clip_norm = clip_norm
         self.normalize_states = normalize_states
+        self.state_chunk_key = state_chunk_key
         if action_norm_mask is not None:
             assert len(action_norm_mask) == action_dim, \
                 f'Action norm mask must be of length {action_dim}'
@@ -382,6 +387,10 @@ class NormalizeStatesAndActions:
         actions = None
         if self.action_key is not None and 'actions' in data:
             actions = np.asarray(data['actions'], dtype=np.float32)
+        state_chunks = None
+        if self.state_chunk_key is not None and self.state_chunk_key in data:
+            state_chunks = np.asarray(
+                data[self.state_chunk_key], dtype=np.float32)
 
         needs_state_stats = (
             self.normalize_states and self.state_norm_type != 'none')
@@ -390,11 +399,18 @@ class NormalizeStatesAndActions:
         if needs_state_stats or needs_action_stats:
             assert 'stats' in data, "Input data must contain 'stats' key"
 
+        state_stats = None
         if needs_state_stats:
             state_stats = data['stats'][self.state_key]
             states = self._normalize_by_type(states, state_stats,
                                              self.state_norm_type)
         data['states'] = states
+        if state_chunks is not None:
+            if needs_state_stats:
+                state_chunks = self._normalize_by_type(state_chunks,
+                                                       state_stats,
+                                                       self.state_norm_type)
+            data[self.state_chunk_key] = state_chunks
 
         if actions is not None:
             action_stats = None
@@ -407,6 +423,9 @@ class NormalizeStatesAndActions:
         if self.state_dim is not None:
             data['states'] = self._pad_or_truncate_last_dim(
                 states, self.state_dim)
+            if state_chunks is not None:
+                data[self.state_chunk_key] = self._pad_or_truncate_last_dim(
+                    state_chunks, self.state_dim)
         if self.action_dim is not None and actions is not None:
             data['actions'] = self._pad_or_truncate_last_dim(
                 actions, self.action_dim)

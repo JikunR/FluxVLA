@@ -372,6 +372,7 @@ class WAMHead(nn.Module):
         context_mask: torch.Tensor,
         fuse_vae_embedding_in_latents: bool,
         gt_action: Optional[torch.Tensor] = None,
+        attention_mode: str = 'joint',
     ):
         video_pre = self.video_expert.pre_dit(
             x=latents_video,
@@ -388,12 +389,21 @@ class WAMHead(nn.Module):
             context_mask=context_mask,
         )
 
-        attention_mask = self._build_joint_attention_mask(
+        attention_mask_kwargs = dict(
             video_seq_len=video_pre['tokens'].shape[1],
             action_seq_len=action_pre['tokens'].shape[1],
             video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
             device=video_pre['tokens'].device,
         )
+        if attention_mode == 'joint':
+            attention_mask = self._build_joint_attention_mask(
+                **attention_mask_kwargs)
+        elif attention_mode == 'forward':
+            attention_mask = self._build_forward_attention_mask(
+                **attention_mask_kwargs)
+        else:
+            raise ValueError(
+                f'Unknown WAM attention mode: {attention_mode!r}.')
         tokens_out = self.mot(
             embeds_all={
                 'video': video_pre['tokens'],
@@ -653,6 +663,7 @@ class WAMHead(nn.Module):
             device=device, dtype=self.torch_dtype)
         latents_video[:, :, 0:1] = first_frame_latents.clone()
 
+        fixed_action = None
         if action is not None:
             if action.ndim == 2:
                 action = action.unsqueeze(0)
@@ -662,7 +673,7 @@ class WAMHead(nn.Module):
                     '`action` must have shape [T, D] or [1, T, D] '
                     f'with action_horizon={action_horizon}, got '
                     f'{tuple(action.shape)}')
-            action = action.to(device=device, dtype=self.torch_dtype)
+            fixed_action = action.to(device=device, dtype=self.torch_dtype)
 
         fuse_flag = bool(
             getattr(self.video_expert, 'fuse_vae_embedding_in_latents', False))
@@ -687,6 +698,9 @@ class WAMHead(nn.Module):
                 dtype=latents_video.dtype, device=device)
             timestep_action = step_t_action.unsqueeze(0).to(
                 dtype=latents_action.dtype, device=device)
+            if fixed_action is not None:
+                latents_action = fixed_action
+                timestep_action = torch.zeros_like(timestep_action)
             pred_video, pred_action = self._predict_joint_noise(
                 latents_video=latents_video,
                 latents_action=latents_action,
@@ -695,12 +709,15 @@ class WAMHead(nn.Module):
                 context=context,
                 context_mask=context_mask,
                 fuse_vae_embedding_in_latents=fuse_flag,
-                gt_action=action,
+                gt_action=fixed_action,
+                attention_mode='forward'
+                if fixed_action is not None else 'joint',
             )
             latents_video = self.infer_video_scheduler.step(
                 pred_video, step_delta_video, latents_video)
-            latents_action = self.infer_action_scheduler.step(
-                pred_action, step_delta_action, latents_action)
+            if fixed_action is None:
+                latents_action = self.infer_action_scheduler.step(
+                    pred_action, step_delta_action, latents_action)
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
         return latents_video, latents_action[0].detach().to(

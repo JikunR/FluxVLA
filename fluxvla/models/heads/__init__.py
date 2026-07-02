@@ -26,5 +26,6 @@ except ImportError:
 
 try:
     from .wam_head import WAMHead  # noqa: F401
+    from .wam_state_chunk_head import WAMStateChunkHead  # noqa: F401
 except ImportError:
     pass
