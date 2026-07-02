@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .cosmos3 import Cosmos3MoTBackbone  # noqa: F401, F403
 from .eagle import EagleBackbone, EagleInferenceBackbone  # noqa: F401, F403
 from .florence2 import Florence2Backbone  # noqa: F401, F403
 from .paligemma import PaliGemma  # noqa: F401, F403

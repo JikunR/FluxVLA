@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .domain_aware_linear import DomainAwareLinear  # noqa: F401, F403
 from .fused_projector import FusedMLPProjector  # noqa: F401, F403
 from .linear_projector import LinearProjector  # noqa: F401, F403
 from .linear_projector_inference import \
