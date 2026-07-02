@@ -1,0 +1,73 @@
+Cosmos3 / cosmos-framework vendor subset
+========================================
+
+Source: https://github.com/nvidia/cosmos-framework
+License: OpenMDW-1.1 (NVIDIA)
+Copyright: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+
+Scope
+-----
+
+This directory is intentionally not a full copy of cosmos-framework. FluxVLA
+keeps only the files needed by:
+
+- `fluxvla.models.vlas.cosmos3_flowmatching.Cosmos3FlowMatching`
+- `fluxvla.transforms.transform_cosmos3`
+- `scripts/cosmos3_fluxvla_infer.py`
+
+Current subset size: 14 Python files.
+
+Kept modules
+------------
+
+- `data/vfm/sequence_packing.py` and `data/vfm/utils.py`
+- `model/vfm/mot/` mRoPE helpers retained by the native MoT wrapper under
+  `fluxvla.models.backbones.vlms.cosmos3`
+- `model/vfm/diffusion/samplers/fm_solvers_unipc.py`
+- `model/vfm/tokenizers/wan2pt2_vae_4x16x16.py`
+- `model/vfm/utils/data_and_condition.py`
+
+Removed modules
+---------------
+
+FluxVLA does not vendor the upstream Cosmos3 training/inference stack:
+
+- upstream `configs/`
+- upstream `inference/`
+- `OmniMoTModel`, `Cosmos3VFMNetwork`, parallelization helpers
+- old action normalization/spec utilities
+- old loss helpers and non-UniPC sampler wrappers, including EDM sampler and
+  its multi-step / Runge-Kutta helper utilities
+- generic checkpoint/download/distributed/lazy-config utilities
+- upstream attention backend probes and backend environment filters
+- upstream `model/attention/`; FluxVLA now owns the compact flash-attn 2/3
+  varlen frontend under `fluxvla.models.backbones.vlms.cosmos3`
+- HF understanding shim / `transformers_cosmos3`; FluxVLA keeps a native MoT
+  wrapper instead of exposing Cosmos3 checkpoints through HF `AutoModel`
+- dense Qwen3-VL config/model copies; the FluxVLA-native MoT wrapper imports
+  the official `transformers.models.qwen3_vl` internals directly
+- empty upstream package marker files that are not needed under Python 3
+  namespace package resolution
+- upstream MoT wrapper file moved into the FluxVLA-native backbone package
+- upstream MoT memory utilities; reasoner generation uses the standard
+  HuggingFace Qwen3-VL generation/cache path through the native wrapper
+- HF diffusers Wan VAE adapter and local `AutoencoderKLWan` copy; Cosmos3
+  now uses the original Wan2.2 `Wan2.2_VAE.pth` tokenizer path directly
+
+FluxVLA patches
+---------------
+
+Each intentional deviation is annotated inline with `FluxVLA vendor patch` or
+`FluxVLA vendor note`.
+
+- `__init__.py`: registers this package as `_c3` for legacy import aliases.
+- `data/vfm/sequence_packing.py`: uses FluxVLA logging and keeps the dense
+  two-way packing path used by the FluxVLA MoT wrapper.
+- `model/vfm/mot/modeling_utils.py`: casts timestep embeddings to module dtype
+  before bf16 Linear layers.
+- `model/vfm/tokenizers/wan2pt2_vae_4x16x16.py`: original Cosmos3 Wan2.2
+  4x16x16 VAE core with local-path loading and small FluxVLA shims for
+  logging and single-process helpers.
+- `model/vfm/diffusion/samplers/fm_solvers_unipc.py`: exposes configurable
+  Karras sigma parameters used by FluxVLA-native Cosmos3 inference.
