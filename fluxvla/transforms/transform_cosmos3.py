@@ -449,6 +449,9 @@ class BuildCosmos3Sequence:
                     f'got '
                     f'{state.shape[-1]}. Run NormalizeStatesAndActions '
                     'before BuildCosmos3Sequence.')
+            # This row is a proprio condition token, not a true history action.
+            # Cosmos3 applies the raw_action_dim mask later inside the model,
+            # so train/eval both keep only the action-compatible prefix.
             action = np.concatenate([state[None, :], action], axis=0)
 
         history_action = data.pop('history_action', None)

@@ -739,6 +739,9 @@ class LiberoEvalRunner(BaseEvalRunner):
                             action=action,
                             task_suite_name=self.task_suite_name,
                             norm_stats_key=self.norm_stats_key,
+                            robot0_eef_pos=obs.get('robot0_eef_pos'),
+                            robot0_eef_quat=obs.get('robot0_eef_quat'),
+                            robot0_gripper_qpos=obs.get('robot0_gripper_qpos'),
                         )
                         action_denormed = self.denormalize_action(inputs)
                         obs, reward, done, info = env.step(

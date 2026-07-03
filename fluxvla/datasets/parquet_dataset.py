@@ -51,6 +51,8 @@ class ParquetDataset(Dataset):
                  transforms: List[Dict],
                  action_window_size: int = 9,
                  action_key: str = 'observation.state',
+                 state_window_key: Optional[str] = None,
+                 state_window_output_key: str = 'state_window',
                  use_delta: bool = False,
                  statistic_name: str = 'private',
                  window_start_idx: int = 1,
@@ -81,6 +83,11 @@ class ParquetDataset(Dataset):
                 video processing.
                 Defaults to None.
             action_key (str): Key for the action data.
+            state_window_key (str, optional): If set, collect this key at the
+                same indices as the action window and expose it as
+                ``state_window_output_key``. This is useful when action targets
+                need same-step proprio, e.g. converting delta actions to
+                absolute controller goals.
             use_delta (bool): Whether to use delta actions.
                 Defaults to False.
             statistic_name (str): Name for the statistics collection.
@@ -184,6 +191,8 @@ class ParquetDataset(Dataset):
             if repeat_to_full_length else len(self.sample_indices))
         self.transforms = list()
         self.action_key = action_key
+        self.state_window_key = state_window_key
+        self.state_window_output_key = state_window_output_key
         self.use_delta = use_delta
         self.statistic_name = statistic_name
         self.window_start_idx = window_start_idx
@@ -340,6 +349,7 @@ class ParquetDataset(Dataset):
             dataset_idx = self._get_dataset_index(index)
         actions = list()
         action_masks = list()
+        state_window = list() if self.state_window_key is not None else None
         window_idx = self.window_start_idx
         while len(actions) < self.action_window_size:
             action_index = index + window_idx
@@ -356,10 +366,15 @@ class ParquetDataset(Dataset):
                                               1][self.action_key])).tolist())
                 else:
                     actions.append(self.dataset[action_index][self.action_key])
+                if state_window is not None:
+                    state_window.append(
+                        self.dataset[action_index][self.state_window_key])
                 action_masks.append(1)
             elif action_task == 'empty':
                 for _ in range(self.action_window_size - len(actions)):
                     actions.append(actions[-1])
+                    if state_window is not None:
+                        state_window.append(state_window[-1])
                     action_masks.append(0)
                 break
             elif action_task == 'static':
@@ -368,8 +383,12 @@ class ParquetDataset(Dataset):
             else:
                 if len(actions) > 0:
                     actions.append(actions[-1])
+                    if state_window is not None:
+                        state_window.append(state_window[-1])
                 else:
                     actions.append(data[self.action_key])
+                    if state_window is not None:
+                        state_window.append(data[self.state_window_key])
                 action_masks.append(0)
             window_idx += 1
         # Collect forward-looking frame timestamps for video models
@@ -395,6 +414,9 @@ class ParquetDataset(Dataset):
         data['stats'] = dataset_statistics[self.statistic_name]
         data['actions'] = np.array(actions, dtype=np.float32)
         data['action_masks'] = np.array(action_masks, dtype=np.float32)
+        if state_window is not None:
+            data[self.state_window_output_key] = np.array(
+                state_window, dtype=np.float32)
         if self.expose_index:
             data['index'] = np.array(index, dtype=np.int64)
         data['task_description'] = self._get_task_name(dataset_idx, index)

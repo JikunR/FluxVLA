@@ -24,6 +24,105 @@ from fluxvla.engines.utils.robot_utils import (invert_gripper_action,
                                                normalize_gripper_action)
 
 
+def _axisangle_to_rotmat(axisangle: np.ndarray) -> np.ndarray:
+    axisangle = np.asarray(axisangle, dtype=np.float32)
+    angle = np.linalg.norm(axisangle, axis=-1, keepdims=True)
+    axis = axisangle / np.maximum(angle, 1e-8)
+    x, y, z = np.moveaxis(axis, -1, 0)
+    zero = np.zeros_like(x)
+    k_mat = np.stack(
+        (
+            zero,
+            -z,
+            y,
+            z,
+            zero,
+            -x,
+            -y,
+            x,
+            zero,
+        ),
+        axis=-1,
+    ).reshape(axisangle.shape[:-1] + (3, 3))
+    eye = np.eye(3, dtype=np.float32)
+    sin = np.sin(angle)[..., None]
+    cos = np.cos(angle)[..., None]
+    return eye + sin * k_mat + (1.0 - cos) * np.matmul(k_mat, k_mat)
+
+
+def _quat_xyzw_to_rotmat(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32)
+    quat = quat / np.maximum(
+        np.linalg.norm(quat, axis=-1, keepdims=True), 1e-8)
+    x, y, z, w = np.moveaxis(quat, -1, 0)
+    return np.stack(
+        (
+            1 - 2 * (y * y + z * z),
+            2 * (x * y - z * w),
+            2 * (x * z + y * w),
+            2 * (x * y + z * w),
+            1 - 2 * (x * x + z * z),
+            2 * (y * z - x * w),
+            2 * (x * z - y * w),
+            2 * (y * z + x * w),
+            1 - 2 * (x * x + y * y),
+        ),
+        axis=-1,
+    ).reshape(quat.shape[:-1] + (3, 3))
+
+
+def _rotmat_to_rot6d(rotmat: np.ndarray) -> np.ndarray:
+    return np.asarray(
+        rotmat,
+        dtype=np.float32)[..., :2, :].reshape(rotmat.shape[:-2] + (6, ))
+
+
+def _rot6d_to_rotmat(rot6d: np.ndarray) -> np.ndarray:
+    rot6d = np.asarray(rot6d, dtype=np.float32)
+    a1 = rot6d[..., :3]
+    a2 = rot6d[..., 3:6]
+    b1 = a1 / np.maximum(np.linalg.norm(a1, axis=-1, keepdims=True), 1e-8)
+    a2 = a2 - np.sum(b1 * a2, axis=-1, keepdims=True) * b1
+    b2 = a2 / np.maximum(np.linalg.norm(a2, axis=-1, keepdims=True), 1e-8)
+    b3 = np.cross(b1, b2)
+    return np.stack((b1, b2, b3), axis=-2)
+
+
+def _rotmat_to_axisangle(rotmat: np.ndarray) -> np.ndarray:
+    rotmat = np.asarray(rotmat, dtype=np.float32)
+    cos = (np.trace(rotmat, axis1=-2, axis2=-1) - 1.0) * 0.5
+    angle = np.arccos(np.clip(cos, -1.0, 1.0))
+    axis = np.stack(
+        (
+            rotmat[..., 2, 1] - rotmat[..., 1, 2],
+            rotmat[..., 0, 2] - rotmat[..., 2, 0],
+            rotmat[..., 1, 0] - rotmat[..., 0, 1],
+        ),
+        axis=-1,
+    )
+    axis = axis / np.maximum(2.0 * np.sin(angle)[..., None], 1e-8)
+    return axis * angle[..., None]
+
+
+def _libero_state_to_rot6d(values: np.ndarray,
+                           include_gripper: bool = True) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if values.shape[-1] < 6:
+        raise ValueError('LIBERO pose conversion expects xyz+axis-angle, got '
+                         f'shape {values.shape}.')
+    pos = values[..., :3]
+    rot6d = _rotmat_to_rot6d(_axisangle_to_rotmat(values[..., 3:6]))
+    parts = [pos, rot6d]
+    if include_gripper:
+        gripper = values[..., 6:]
+        if gripper.shape[-1] == 0:
+            gripper = np.zeros(values.shape[:-1] + (1, ), dtype=np.float32)
+        else:
+            gripper = gripper[..., :1]
+        parts.append(gripper.astype(np.float32))
+    return np.concatenate(parts, axis=-1).astype(np.float32)
+
+
 @TRANSFORMS.register_module()
 class Normalize:
     """Normalize the data using provided statistics.
@@ -314,6 +413,165 @@ class DenormalizePrivateAction(DenormalizeLiberoAction):
             else:  # norm_type == 'mean_std'
                 action = self._denormalize(action, norm_stats['action'])
         return action
+
+
+@TRANSFORMS.register_module()
+class LiberoDeltaActionToGoalRot6D:
+    """Convert LIBERO OSC deltas to absolute controller goals.
+
+    The input ``states`` keeps the observed absolute proprio pose, while
+    ``actions`` is the recorded 7D normalized OSC_POSE command. The output
+    uses absolute controller goals for pose and preserves the recorded gripper
+    command in the last channel: ``xyz(3) + rot6d(6) + gripper(1)``.
+    """
+
+    def __init__(self,
+                 state_key: str = 'states',
+                 action_key: str = 'actions',
+                 state_window_key: str = 'state_window',
+                 pos_scale: float = 0.05,
+                 rot_scale: float = 0.5) -> None:
+        self.state_key = state_key
+        self.action_key = action_key
+        self.state_window_key = state_window_key
+        self.pos_scale = float(pos_scale)
+        self.rot_scale = float(rot_scale)
+
+    def __call__(self, data: Dict) -> Dict:
+        state = np.asarray(data[self.state_key], dtype=np.float32)
+        if self.state_window_key not in data:
+            raise KeyError(
+                f'{type(self).__name__} requires `{self.state_window_key}` '
+                'aligned with the action window.')
+        state_window = np.asarray(
+            data[self.state_window_key], dtype=np.float32)
+        actions = np.asarray(data[self.action_key], dtype=np.float32)
+        if state.shape[-1] < 6:
+            raise ValueError('LIBERO state must contain xyz+axis-angle, got '
+                             f'shape {state.shape}.')
+        if state_window.shape[:-1] != actions.shape[:-1]:
+            raise ValueError(
+                f'LIBERO state_window shape {state_window.shape} must align '
+                f'with actions shape {actions.shape}.')
+        if state_window.shape[-1] < 6:
+            raise ValueError(
+                'LIBERO state_window must contain xyz+axis-angle, got '
+                f'shape {state_window.shape}.')
+        if actions.shape[-1] < 7:
+            raise ValueError(
+                'LIBERO action must contain 7D OSC_POSE command, got '
+                f'shape {actions.shape}.')
+
+        current_pos = state_window[..., :3]
+        current_rot = _axisangle_to_rotmat(state_window[..., 3:6])
+        target_pos = current_pos + actions[..., :3] * self.pos_scale
+        delta_rot = _axisangle_to_rotmat(actions[..., 3:6] * self.rot_scale)
+        target_rot = np.matmul(delta_rot, current_rot)
+        target = np.concatenate(
+            (
+                target_pos,
+                _rotmat_to_rot6d(target_rot),
+                actions[..., 6:7],
+            ),
+            axis=-1,
+        ).astype(np.float32)
+
+        data[self.state_key] = _libero_state_to_rot6d(state)
+        data[self.action_key] = target
+        return data
+
+
+@TRANSFORMS.register_module()
+class LiberoProprioRot6DFromInputs:
+    """Build eval-time LIBERO state in xyz+rot6d+gripper layout."""
+
+    def __init__(self,
+                 state_dim: int = None,
+                 pos_key: str = 'robot0_eef_pos',
+                 quat_key: str = 'robot0_eef_quat',
+                 gripper_key: str = 'robot0_gripper_qpos',
+                 out_key: str = 'states') -> None:
+        self.state_dim = state_dim
+        self.pos_key = pos_key
+        self.quat_key = quat_key
+        self.gripper_key = gripper_key
+        self.out_key = out_key
+
+    def __call__(self, data: Dict) -> Dict:
+        pos = np.asarray(data[self.pos_key], dtype=np.float32)
+        quat = np.asarray(data[self.quat_key], dtype=np.float32)
+        gripper = np.asarray(
+            data[self.gripper_key], dtype=np.float32).reshape(-1)[:1]
+        state = np.concatenate(
+            (pos, _rotmat_to_rot6d(_quat_xyzw_to_rotmat(quat)), gripper),
+            axis=-1,
+        ).astype(np.float32)
+        if self.state_dim is not None:
+            padded = np.zeros((self.state_dim, ), dtype=np.float32)
+            padded[:state.shape[0]] = state
+            state = padded
+        out = dict(data)
+        out[self.out_key] = state
+        return out
+
+
+@TRANSFORMS.register_module()
+class DenormalizeLiberoRot6DAction:
+    """Convert absolute xyz+rot6d+gripper target to LIBERO OSC_POSE action."""
+
+    def __init__(self,
+                 pos_scale: float = 0.05,
+                 rot_scale: float = 0.5,
+                 action_dim: int = 10,
+                 env_action_dim: int = 7,
+                 pos_key: str = 'robot0_eef_pos',
+                 quat_key: str = 'robot0_eef_quat',
+                 gripper_key: str = 'robot0_gripper_qpos',
+                 norm_stats=None) -> None:
+        del norm_stats
+        self.pos_scale = float(pos_scale)
+        self.rot_scale = float(rot_scale)
+        self.action_dim = int(action_dim)
+        self.env_action_dim = int(env_action_dim)
+        self.pos_key = pos_key
+        self.quat_key = quat_key
+        self.gripper_key = gripper_key
+
+    def __call__(self, data: Dict) -> np.ndarray:
+        action = np.asarray(data['action'], dtype=np.float32)
+        if action.shape[-1] < self.action_dim:
+            raise ValueError(
+                f'Expected rot6d action dim >= {self.action_dim}, got '
+                f'{action.shape[-1]}.')
+        target = action[..., :self.action_dim]
+        current_pos = self._required_array(data, self.pos_key)
+        current_quat = self._required_array(data, self.quat_key)
+        self._required_array(data, self.gripper_key)
+
+        delta_pos = (target[:3] - current_pos) / self.pos_scale
+        current_rot = _quat_xyzw_to_rotmat(current_quat)
+        target_rot = _rot6d_to_rotmat(target[3:9])
+        delta_rot = np.matmul(target_rot, np.swapaxes(current_rot, -1, -2))
+        delta_axisangle = _rotmat_to_axisangle(delta_rot) / self.rot_scale
+
+        gripper_action = np.array([target[9]], dtype=np.float32)
+        gripper_action = normalize_gripper_action(
+            gripper_action, binarize=True)
+        gripper_action = invert_gripper_action(gripper_action)
+        env_action = np.concatenate(
+            (delta_pos, delta_axisangle, gripper_action),
+            axis=-1,
+        ).astype(np.float32)
+        return np.clip(env_action[:self.env_action_dim], -1.0, 1.0)
+
+    @staticmethod
+    def _required_array(data: Dict, key: str) -> np.ndarray:
+        value = data.get(key)
+        if value is None:
+            raise KeyError(
+                f'DenormalizeLiberoRot6DAction requires `{key}` from the '
+                'current LIBERO observation.')
+        return np.asarray(value, dtype=np.float32)
 
 
 @TRANSFORMS.register_module()

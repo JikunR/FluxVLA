@@ -120,14 +120,13 @@ class Cosmos3InferenceMixin:
         *,
         dtype: torch.dtype,
         device: torch.device,
-        raw_action_dim_value: int,
     ) -> torch.Tensor:
         if actions.dim() != 3:
             raise ValueError('Cosmos3 actions must have shape [B,T,D], '
                              f'got {tuple(actions.shape)}.')
-        if actions.shape[-1] > raw_action_dim_value:
+        if actions.shape[-1] > self.max_action_dim:
             raise ValueError(f'Cosmos3 expected action dim <= '
-                             f'{raw_action_dim_value}, got '
+                             f'{self.max_action_dim}, got '
                              f'{actions.shape[-1]}.')
         actions = actions.to(device=device, dtype=dtype).clone()
         if actions.shape[-1] < self.max_action_dim:
@@ -320,8 +319,11 @@ class Cosmos3InferenceMixin:
                 action_tokens_input,
                 dtype=action_dtype,
                 device=device,
-                raw_action_dim_value=raw_action_dim_value,
             )
+            # Match training-time action dim masking: prepend-state/proprio
+            # condition rows may be padded to max_action_dim, but only the
+            # raw action prefix is part of the action modality.
+            conditioned_actions[:, :, raw_action_dim_value:] = 0
 
         if not denoise_action:
             if conditioned_actions is None:
