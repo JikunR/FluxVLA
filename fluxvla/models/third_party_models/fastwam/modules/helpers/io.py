@@ -49,7 +49,7 @@ class ModelConfig:
         if os.environ.get("DIFFSYNTH_MODEL_BASE_PATH") is not None:
             self.local_model_path = os.environ.get("DIFFSYNTH_MODEL_BASE_PATH")
         elif self.local_model_path is None:
-            self.local_model_path = "/root/projects/ryanhu/checkpoints/"
+            self.local_model_path = "./checkpoints/"
 
     def require_downloading(self):
         if self.path is not None:

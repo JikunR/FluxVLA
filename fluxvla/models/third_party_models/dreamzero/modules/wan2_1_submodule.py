@@ -3,7 +3,7 @@
 # Origin: Source
 # Upstream-URL: https://github.com/dreamzero0/dreamzero/blob/main/groot/vla/model/dreamzero/modules/wan2_1_submodule.py
 # Upstream-Ref: main
-# Additional-Upstream-URL: https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/model.py
+# Additional-Upstream-URL: https://github.comWan-VideoWan2.1/blob/main/wan/modules/model.py
 # SPDX-License-Identifier: Apache-2.0
 # Notes: Attribution normalized; no functional change.
 

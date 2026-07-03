@@ -4,7 +4,7 @@
 # Origin: Source
 # Upstream-URL: https://github.com/dreamzero0/dreamzero/blob/main/groot/vla/model/dreamzero/modules/wan_video_vae.py
 # Upstream-Ref: main
-# Additional-Upstream-URL: https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/vae.py
+# Additional-Upstream-URL: https://github.comWan-VideoWan2.1/blob/main/wan/modules/vae.py
 # Notes: Attribution normalized; no functional change.
 
 import torch

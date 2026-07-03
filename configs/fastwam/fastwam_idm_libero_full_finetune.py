@@ -15,8 +15,8 @@
 # FastWAM world-action model (idm, teacher-forcing) jointly trained on all
 # four LIBERO suites (spatial + object + goal + 10).
 
-_ckpt_root = '/root/projects/ryanhu/checkpoints'
-_tokenizer = _ckpt_root + '/Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl'
+_ckpt_root = './checkpoints'
+_tokenizer = _ckpt_root + '/Wan2.2-TI2V-5B/google/umt5-xxl'
 
 _frame_window_size = 9
 _action_window_size = 48
@@ -47,11 +47,11 @@ model = dict(
     mot_checkpoint_mixed_attn=True,
     vlm_backbone=dict(
         type='Wan22Backbone',
-        model_id='Wan-AI/Wan2.2-TI2V-5B',
-        tokenizer_model_id='Wan-AI/Wan2.1-T2V-1.3B',
+        model_id='Wan2.2-TI2V-5B',
+        tokenizer_model_id='Wan2.2-TI2V-5B',
         tokenizer_max_len=128,
         load_text_encoder=False,
-        redirect_common_files=True,
+        redirect_common_files=False,
     ),
     vla_head=dict(
         type='FastWAMIDMHead',
@@ -175,7 +175,7 @@ train_dataloader = dict(
                 ),
                 dict(
                     type='LoadCachedTextEmbedding',
-                    cache_dir=('/root/projects/ryanhu/data/'
+                    cache_dir=('/mnt/data/cpfs/mnt/data/yanis/FastWAM/data/'
                                'text_embeds_cache/libero'),
                     context_len=128,
                     enc_id='wan22ti2v5b',
@@ -258,7 +258,7 @@ eval = dict(
         allowed_missing_key_prefixes=('vlm_backbone.text_encoder.', ),
         norm_stats_key=_statistic_name,
         eval_chunk_size=10,
-        eval_shard_strategy='task',
+        eval_shard_strategy='episode',
         preprocess_every_step=False,
         num_inference_steps=10,
         max_steps=dict(

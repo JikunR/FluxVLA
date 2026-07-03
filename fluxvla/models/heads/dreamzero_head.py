@@ -51,13 +51,12 @@ def _ensure_file(path, hf_filename):
     """Return a valid local path for pretrained weights.
 
     Uses *path* directly when it exists on disk, otherwise downloads
-    from the Wan-AI/Wan2.1-I2V-14B-480P HuggingFace repo.
+    from the Wan2.1-I2V-14B-480P HuggingFace repo.
     """
     if path is not None and os.path.exists(path):
         return path
     from huggingface_hub import hf_hub_download
-    return hf_hub_download(
-        repo_id='Wan-AI/Wan2.1-I2V-14B-480P', filename=hf_filename)
+    return hf_hub_download(repo_id='Wan2.1-I2V-14B-480P', filename=hf_filename)
 
 
 @HEADS.register_module()

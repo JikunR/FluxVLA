@@ -32,19 +32,19 @@ class Wan22LoadedComponents:
 
 WAN22_MODEL_REGISTRY = [
     {
-        # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
+        # Example: ModelConfig(model_id="Wan2.1-T2V-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
         "model_hash": "9c8818c2cbea55eca56c7b447df170da",
         "model_name": "wan_video_text_encoder",
         "model_class": WanTextEncoder,
     },
     {
-        # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
+        # Example: ModelConfig(model_id="Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "1f5ab7703c6fc803fdded85ff040c316",
         "model_name": "wan_video_dit",
         "model_class": WanVideoDiT,
     },
     {
-        # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="Wan2.2_VAE.pth")
+        # Example: ModelConfig(model_id="Wan2.2-TI2V-5B", origin_file_pattern="Wan2.2_VAE.pth")
         "model_hash": "e1de6c02cdac79f8b739f4d3698cd216",
         "model_name": "wan_video_vae",
         "model_class": WanVideoVAE38,
@@ -130,8 +130,8 @@ def _resolve_configs(model_id: str, tokenizer_model_id: str, redirect_common_fil
 
     if redirect_common_files:
         redirect_dict = {
-            "models_t5_umt5-xxl-enc-bf16.pth": ("DiffSynth-Studio/Wan-Series-Converted-Safetensors", "models_t5_umt5-xxl-enc-bf16.safetensors"),
-            "Wan2.2_VAE.pth": ("DiffSynth-Studio/Wan-Series-Converted-Safetensors", "Wan2.2_VAE.safetensors"),
+            "models_t5_umt5-xxl-enc-bf16.pth": ("DiffSynth-StudioWan-Series-Converted-Safetensors", "models_t5_umt5-xxl-enc-bf16.safetensors"),
+            "Wan2.2_VAE.pth": ("DiffSynth-StudioWan-Series-Converted-Safetensors", "Wan2.2_VAE.safetensors"),
         }
         text_config.model_id, text_config.origin_file_pattern = redirect_dict[text_config.origin_file_pattern]
         vae_config.model_id, vae_config.origin_file_pattern = redirect_dict[vae_config.origin_file_pattern]
@@ -141,8 +141,8 @@ def _resolve_configs(model_id: str, tokenizer_model_id: str, redirect_common_fil
 def load_wan22_ti2v_5b_components(
     device: str = "cuda",
     torch_dtype: torch.dtype = torch.bfloat16,
-    model_id: str = "Wan-AI/Wan2.2-TI2V-5B",
-    tokenizer_model_id: str = "Wan-AI/Wan2.1-T2V-1.3B",
+    model_id: str = "Wan2.2-TI2V-5B",
+    tokenizer_model_id: str = "Wan2.1-T2V-1.3B",
     tokenizer_max_len: int = 512,
     redirect_common_files: bool = True,
     dit_config: dict[str, Any] | None = None,

@@ -157,9 +157,9 @@ def main() -> None:
     video_cfg, action_cfg, backbone_cfg = _load_dit_configs(Path(args.config))
     redirect_common_files = bool(
         backbone_cfg.get('redirect_common_files', True))
-    model_id = str(backbone_cfg.get('model_id', 'Wan-AI/Wan2.2-TI2V-5B'))
+    model_id = str(backbone_cfg.get('model_id', 'Wan2.2-TI2V-5B'))
     tokenizer_model_id = str(
-        backbone_cfg.get('tokenizer_model_id', 'Wan-AI/Wan2.1-T2V-1.3B'))
+        backbone_cfg.get('tokenizer_model_id', 'Wan2.1-T2V-1.3B'))
 
     int_fields = [
         'hidden_dim', 'action_dim', 'ffn_dim', 'num_layers', 'num_heads',

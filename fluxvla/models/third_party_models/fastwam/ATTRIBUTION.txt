@@ -21,7 +21,7 @@ Source projects:
   (see ``.pre-commit-config.yaml``) so they stay byte-identical to upstream.
 
 - Alibaba Wan Video (Wan 2.2 TI2V-5B)
-  Upstream location: https://github.com/Wan-Video/Wan2.2
+  Upstream location: https://github.comWan-VideoWan2.2
   License: Apache-2.0
 
 - DiffSynth-Studio (hash-based model loading utilities)

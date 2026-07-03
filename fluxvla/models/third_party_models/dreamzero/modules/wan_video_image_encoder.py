@@ -4,7 +4,7 @@
 # Origin: Source
 # Upstream-URL: https://github.com/dreamzero0/dreamzero/blob/main/groot/vla/model/dreamzero/modules/wan_video_image_encoder.py
 # Upstream-Ref: main
-# Additional-Upstream-URL: https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/clip.py
+# Additional-Upstream-URL: https://github.comWan-VideoWan2.1/blob/main/wan/modules/clip.py
 # Notes: Concise re-implementation of openai/CLIP and mlfoundations/open_clip. Attribution normalized; no functional change.
 
 import math

@@ -105,12 +105,14 @@ class ProcessParquetInputs():
             to map original keys to new keys.
             Defaults to None.
         video_backend (str, optional): Video decoding backend. One of
-            ``'torchcodec'``, ``'pyav'`` or ``'video_reader'``. When ``None``
-            (default) it resolves to ``'torchcodec'`` if the package is
-            importable, otherwise ``'pyav'``. The ``'torchcodec'`` path
-            decodes by frame index (``round(ts * average_fps)``); on any
-            decode error it transparently falls back to the ``'pyav'``
-            torchvision path.
+            ``'torchcodec'``, ``'pyav'`` or ``'video_reader'``. Defaults to
+            ``'pyav'`` to avoid repeated auto-detection warnings when
+            ``torchcodec`` is unavailable. Passing ``None`` resolves to
+            ``'torchcodec'`` if the package is importable, otherwise
+            ``'pyav'``.
+            The ``'torchcodec'`` path decodes by frame index
+            (``round(ts * average_fps)``); on any decode error it
+            transparently falls back to the ``'pyav'`` torchvision path.
     """
 
     def __init__(self,
@@ -121,7 +123,7 @@ class ProcessParquetInputs():
                  embodiment_dim: int = None,
                  num_padding_imgs: int = 0,
                  dataset_name: str = None,
-                 video_backend: str = None):
+                 video_backend: str = 'pyav'):
         self.parquet_keys = parquet_keys
         self.video_keys = video_keys
         self.name_mappings = name_mappings

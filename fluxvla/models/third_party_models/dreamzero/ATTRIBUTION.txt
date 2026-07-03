@@ -9,7 +9,7 @@ Source projects:
   License: Apache-2.0
 
 - Alibaba Wan Video (Wan 2.1)
-  Upstream location: https://github.com/Wan-Video/Wan2.1/tree/main/wan/modules
+  Upstream location: https://github.comWan-VideoWan2.1/tree/main/wan/modules
   License: Apache-2.0
 
 - Hugging Face Diffusers

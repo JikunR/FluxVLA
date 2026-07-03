@@ -36,7 +36,7 @@
 # ===================================================================
 
 _ckpt_root = './checkpoints'
-_tokenizer = _ckpt_root + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
+_tokenizer = _ckpt_root + 'Wan2.1-I2V-14B-480P/google/umt5-xxl'
 
 _frame_window_size = 17
 
