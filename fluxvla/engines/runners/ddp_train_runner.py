@@ -722,7 +722,11 @@ class DDPTrainRunner(BaseTrainRunner):
         if overwatch.is_rank_zero():
             overwatch.info(
                 f'Resuming training from checkpoint: {self.resume_from}')
-        checkpoint_info = torch.load(self.resume_from)
+        checkpoint_info = torch.load(
+            self.resume_from,
+            map_location='cpu',
+            weights_only=False,
+        )
 
         if 'model' in checkpoint_info:
             self._load_model_state(checkpoint_info['model'])
@@ -805,7 +809,10 @@ class DDPTrainRunner(BaseTrainRunner):
             overwatch.info(f'Loading checkpoint from: {checkpoint_path}')
 
         checkpoint = torch.load(
-            checkpoint_path, map_location='cuda:' + str(self.device_id))
+            checkpoint_path,
+            map_location='cpu',
+            weights_only=False,
+        )
 
         # Load model state dict (DDP-specific)
         if 'model' in checkpoint:

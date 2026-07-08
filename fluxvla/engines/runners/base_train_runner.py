@@ -389,7 +389,11 @@ class BaseTrainRunner(ABC):
         if overwatch.is_rank_zero():
             overwatch.info(
                 f'Resuming training from checkpoint: {self.resume_from}')
-        checkpoint_info = torch.load(self.resume_from)
+        checkpoint_info = torch.load(
+            self.resume_from,
+            map_location='cpu',
+            weights_only=False,
+        )
 
         # Restore model state (delegated to subclasses for FSDP/DDP-specific
         # handling)

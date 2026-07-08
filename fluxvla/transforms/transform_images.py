@@ -1200,18 +1200,25 @@ class PrepareVideo:
     Args:
         num_views (int): Number of camera views. Default: 2.
         frame_window_size (int): Number of temporal frames. Default: 1.
+        pad_missing_views (bool): Whether to pad fewer source views to
+            ``num_views`` with ``pad_value`` before tiling. Default: False.
+        pad_value (float): Value used for padded views.
     """
 
     def __init__(self,
                  num_views: int = 2,
                  frame_window_size: int = 1,
                  tile_direction: str = 'vertical',
+                 pad_missing_views: bool = False,
+                 pad_value: float = 0.0,
                  *args,
                  **kwargs):
         assert tile_direction in ('vertical', 'horizontal', 'robotwin')
         self.num_views = num_views
         self.frame_window_size = frame_window_size
         self.tile_direction = tile_direction
+        self.pad_missing_views = pad_missing_views
+        self.pad_value = pad_value
 
     @staticmethod
     def _resize_sequence_numpy(video: np.ndarray, height: int,
@@ -1258,6 +1265,47 @@ class PrepareVideo:
         tiled = np.concatenate([cam_top, bottom], axis=-2)
         return np.transpose(tiled, (1, 0, 2, 3))
 
+    def _pad_img_masks(self, data: dict, source_views: int):
+        if 'img_masks' not in data:
+            return
+
+        source_len = source_views * self.frame_window_size
+        target_len = self.num_views * self.frame_window_size
+        img_masks = data['img_masks']
+        if len(img_masks) != source_len:
+            raise ValueError(
+                '`img_masks` length must match the source video layout when '
+                '`pad_missing_views=True`: '
+                f'got {len(img_masks)}, expected {source_len}.')
+
+        pad_len = target_len - source_len
+        if isinstance(img_masks, torch.Tensor):
+            padding = img_masks.new_zeros((pad_len, ))
+            data['img_masks'] = torch.cat([img_masks, padding], dim=0)
+            return
+
+        img_masks = np.asarray(img_masks)
+        padding = np.zeros((pad_len, ), dtype=img_masks.dtype)
+        data['img_masks'] = np.concatenate([img_masks, padding], axis=0)
+
+    def _pad_missing_view_tensor(self, images, source_views: int, data: dict):
+        if not self.pad_missing_views or source_views >= self.num_views:
+            return images
+
+        if source_views <= 0:
+            raise ValueError('Cannot pad video with no source views.')
+
+        pad_views = self.num_views - source_views
+        pad_shape = (pad_views, ) + tuple(images.shape[1:])
+        if isinstance(images, torch.Tensor):
+            padding = images.new_full(pad_shape, self.pad_value)
+            padded = torch.cat([images, padding], dim=0)
+        else:
+            padding = np.full(pad_shape, self.pad_value, dtype=images.dtype)
+            padded = np.concatenate([images, padding], axis=0)
+        self._pad_img_masks(data, source_views)
+        return padded
+
     def __call__(self, data: dict):
         # Support both 'images' (training) and 'pixel_values' (eval) keys
         if 'images' in data:
@@ -1275,6 +1323,13 @@ class PrepareVideo:
         is_tensor = isinstance(images, torch.Tensor)
 
         if images.ndim == 5:
+            v, t, c, h, w = images.shape
+            if self.pad_missing_views and t != T:
+                raise ValueError(
+                    'Cannot pad missing views when input temporal length does '
+                    'not match `frame_window_size`: '
+                    f'got {t}, expected {T}.')
+            images = self._pad_missing_view_tensor(images, v, data)
             v, t, c, h, w = images.shape
             if self.tile_direction == 'robotwin':
                 data[img_key] = self._tile_robotwin(images, is_tensor)
@@ -1297,6 +1352,17 @@ class PrepareVideo:
             channels, h, w = images.shape
             if channels > 3 and channels % 3 == 0:
                 n_items = channels // 3
+                if self.pad_missing_views and n_items < V * T:
+                    if n_items % T != 0:
+                        raise ValueError(
+                            'Cannot infer source view count from image layout '
+                            'when `pad_missing_views=True`: '
+                            f'n_items={n_items}, frame_window_size={T}.')
+                    source_views = n_items // T
+                    images = images.reshape(source_views, T, 3, h, w)
+                    images = self._pad_missing_view_tensor(
+                        images, source_views, data)
+                    n_items = V * T
                 if n_items == V * T:
                     images = images.reshape(V, T, 3, h, w)
                     if self.tile_direction == 'robotwin':
