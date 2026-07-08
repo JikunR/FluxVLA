@@ -22,7 +22,10 @@ from fluxvla.engines import HEADS
 from ..third_party_models.fastwam.modules.schedulers.scheduler_continuous import \
     WanContinuousFlowMatchScheduler  # noqa: E501
 
-__all__ = ['FastWAMHead', 'FastWAMJointHead', 'FastWAMIDMHead']
+__all__ = [
+    'FastWAMHead', 'FastWAMJointHead', 'FastWAMIDMHead',
+    'FastWAMPolicyForwardIDMHead'
+]
 
 
 @HEADS.register_module()
@@ -220,6 +223,31 @@ class FastWAMHead(nn.Module):
             device=video_loss_token.device, dtype=video_loss_token.dtype)
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
+
+    def _compute_action_loss(
+        self,
+        pred_action: torch.Tensor,
+        target_action: torch.Tensor,
+        timestep_action: torch.Tensor,
+        action_is_pad: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        action_loss_token = F.mse_loss(
+            pred_action.float(), target_action.float(),
+            reduction='none').mean(dim=2)
+        if action_is_pad is not None:
+            valid = (~action_is_pad).to(
+                device=action_loss_token.device, dtype=action_loss_token.dtype)
+            valid_sum = valid.sum(dim=1).clamp(min=1.0)
+            action_loss_per_sample = (action_loss_token *
+                                      valid).sum(dim=1) / valid_sum
+        else:
+            action_loss_per_sample = action_loss_token.mean(dim=1)
+
+        action_weight = self.train_action_scheduler.training_weight(
+            timestep_action).to(
+                action_loss_per_sample.device,
+                dtype=action_loss_per_sample.dtype)
+        return (action_loss_per_sample * action_weight).mean()
 
     @torch.no_grad()
     def _predict_joint_noise(
@@ -1404,3 +1432,675 @@ class FastWAMIDMHead(FastWAMJointHead):
                 pred_action, step_delta_action, latents_action)
 
         return latents_action
+
+
+@HEADS.register_module()
+class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
+    """Random-mode FastWAM head for forward, IDM, and policy branches.
+
+    Mirrors ``fastwam.models.wan22.fastwam_policy_forward_idm`` from
+    ``fastwam_update`` while preserving FluxVLA's split backbone/head layout.
+    Each training step samples one mode and only backpropagates that branch.
+    """
+
+    valid_training_modes = ('forward', 'idm', 'policy')
+
+    def __init__(
+        self,
+        *args,
+        loss_lambda_forward_video: float = 1.0,
+        loss_lambda_idm_action: float = 1.0,
+        loss_lambda_policy_action: float = 1.0,
+        mode_probs: Optional[Dict[str, float]] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.loss_lambda_forward_video = float(loss_lambda_forward_video)
+        self.loss_lambda_idm_action = float(loss_lambda_idm_action)
+        self.loss_lambda_policy_action = float(loss_lambda_policy_action)
+        self.mode_probs = self._normalize_mode_probs(mode_probs)
+        self._validate_policy_forward_idm_config()
+
+    def _validate_policy_forward_idm_config(self) -> None:
+        if bool(getattr(self.video_expert, 'action_conditioned', False)):
+            raise ValueError(
+                'FastWAMPolicyForwardIDMHead requires '
+                "`video_dit_config['action_conditioned']=false`; actions are "
+                'provided through ActionDiT tokens in MoT attention.')
+        if str(getattr(self.video_expert, 'video_attention_mask_mode', '')) \
+                != 'first_frame_causal':
+            raise ValueError('FastWAMPolicyForwardIDMHead requires '
+                             "`video_dit_config['video_attention_mask_mode']="
+                             "'first_frame_causal'`.")
+        if not bool(getattr(self.video_expert, 'seperated_timestep', False)):
+            raise ValueError('FastWAMPolicyForwardIDMHead requires '
+                             "`video_dit_config['seperated_timestep']=true`.")
+        if not bool(
+                getattr(self.video_expert, 'fuse_vae_embedding_in_latents',
+                        False)):
+            raise ValueError(
+                'FastWAMPolicyForwardIDMHead requires '
+                "`video_dit_config['fuse_vae_embedding_in_latents']=true`.")
+
+    @classmethod
+    def _normalize_mode_probs(
+            cls, mode_probs: Optional[Dict[str, float]]) -> Dict[str, float]:
+        if mode_probs is None:
+            mode_probs = {mode: 1.0 for mode in cls.valid_training_modes}
+        unknown = set(mode_probs) - set(cls.valid_training_modes)
+        if unknown:
+            raise ValueError('Unknown FastWAMPolicyForwardIDMHead mode(s): '
+                             f'{sorted(unknown)}')
+
+        probs = {
+            mode: float(mode_probs.get(mode, 0.0))
+            for mode in cls.valid_training_modes
+        }
+        if any(value < 0.0 for value in probs.values()):
+            raise ValueError(f'`mode_probs` must be non-negative, got {probs}')
+        total = sum(probs.values())
+        if total <= 0.0:
+            raise ValueError(
+                'At least one `mode_probs` entry must be positive.')
+        return {mode: value / total for mode, value in probs.items()}
+
+    def _sample_training_mode(self, device: torch.device) -> str:
+        probs = torch.tensor(
+            [self.mode_probs[mode] for mode in self.valid_training_modes],
+            device=device,
+            dtype=torch.float32,
+        )
+        if torch.distributed.is_available() and \
+                torch.distributed.is_initialized():
+            backend = str(torch.distributed.get_backend()).lower()
+            idx_device = torch.device('cpu') if backend == 'gloo' else device
+            idx_tensor = torch.empty((), device=idx_device, dtype=torch.long)
+            if torch.distributed.get_rank() == 0:
+                sampled = torch.multinomial(
+                    probs, num_samples=1).to(
+                        device=idx_device, dtype=torch.long)
+                idx_tensor.copy_(sampled[0])
+            torch.distributed.broadcast(idx_tensor, src=0)
+            return self.valid_training_modes[int(idx_tensor.cpu().item())]
+
+        idx = int(torch.multinomial(probs, num_samples=1).item())
+        return self.valid_training_modes[idx]
+
+    @torch.no_grad()
+    def _build_forward_attention_mask(
+        self,
+        video_seq_len: int,
+        action_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        total_seq_len = video_seq_len + action_seq_len
+        mask = torch.zeros((total_seq_len, total_seq_len),
+                           dtype=torch.bool,
+                           device=device)
+        mask[:video_seq_len, :video_seq_len] = \
+            self.video_expert.build_video_to_video_mask(
+                video_seq_len=video_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=device,
+            )
+        mask[video_seq_len:, video_seq_len:] = True
+        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
+        mask[first_frame_tokens:video_seq_len, video_seq_len:] = True
+        return mask
+
+    @torch.no_grad()
+    def _build_policy_attention_mask(
+        self,
+        video_seq_len: int,
+        action_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        total_seq_len = video_seq_len + action_seq_len
+        mask = torch.zeros((total_seq_len, total_seq_len),
+                           dtype=torch.bool,
+                           device=device)
+        mask[:video_seq_len, :video_seq_len] = \
+            self.video_expert.build_video_to_video_mask(
+                video_seq_len=video_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=device,
+            )
+        mask[video_seq_len:, video_seq_len:] = True
+        mask[video_seq_len:, :video_seq_len] = True
+        return mask
+
+    @torch.no_grad()
+    def _build_mot_attention_mask(
+        self,
+        video_seq_len: int,
+        action_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        return self._build_policy_attention_mask(
+            video_seq_len=video_seq_len,
+            action_seq_len=action_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
+            device=device,
+        )
+
+    def _compute_forward_video_loss(
+        self,
+        input_latents: torch.Tensor,
+        prep: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        device = input_latents.device
+        batch_size = int(input_latents.shape[0])
+        action = prep['action']
+
+        noise_video = torch.randn_like(input_latents)
+        timestep_video = self.train_video_scheduler.sample_training_t(
+            batch_size=batch_size, device=device, dtype=input_latents.dtype)
+        latents = self.train_video_scheduler.add_noise(input_latents,
+                                                       noise_video,
+                                                       timestep_video)
+        target_video = self.train_video_scheduler.training_target(
+            input_latents, noise_video, timestep_video)
+        if prep['first_frame_latents'] is not None:
+            latents[:, :, 0:1] = prep['first_frame_latents']
+
+        timestep_action = torch.zeros((batch_size, ),
+                                      dtype=action.dtype,
+                                      device=device)
+        video_pre = self.video_expert.pre_dit(
+            x=latents,
+            timestep=timestep_video,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+            action=None,
+            fuse_vae_embedding_in_latents=prep['fuse_flag'],
+        )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=action,
+            timestep=timestep_action,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+        )
+        if video_pre['t_mod'].ndim != 4:
+            raise ValueError(
+                'Forward branch requires token-wise video `t_mod`; ensure '
+                '`seperated_timestep=true` and '
+                '`fuse_vae_embedding_in_latents=true`.')
+
+        attention_mask = self._build_forward_attention_mask(
+            video_seq_len=video_pre['tokens'].shape[1],
+            action_seq_len=action_pre['tokens'].shape[1],
+            video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
+            device=video_pre['tokens'].device,
+        )
+        tokens_out = self.mot(
+            embeds_all={
+                'video': video_pre['tokens'],
+                'action': action_pre['tokens'],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                'video': video_pre['freqs'],
+                'action': action_pre['freqs'],
+            },
+            context_all={
+                'video': {
+                    'context': video_pre['context'],
+                    'mask': video_pre['context_mask'],
+                },
+                'action': {
+                    'context': action_pre['context'],
+                    'mask': action_pre['context_mask'],
+                },
+            },
+            t_mod_all={
+                'video': video_pre['t_mod'],
+                'action': action_pre['t_mod'],
+            },
+        )
+        pred_video = self.video_expert.post_dit(tokens_out['video'], video_pre)
+        zero_anchor = self.action_expert.post_dit(
+            tokens_out['action'], action_pre).float().sum() * 0.0
+
+        include_initial_video_step = prep['first_frame_latents'] is None
+        if prep['first_frame_latents'] is not None:
+            pred_video = pred_video[:, :, 1:]
+            target_video = target_video[:, :, 1:]
+        loss_video_per_sample = self._compute_video_loss_per_sample(
+            pred_video=pred_video,
+            target_video=target_video,
+            image_is_pad=prep['image_is_pad'],
+            include_initial_video_step=include_initial_video_step,
+        )
+        video_weight = self.train_video_scheduler.training_weight(
+            timestep_video).to(
+                loss_video_per_sample.device,
+                dtype=loss_video_per_sample.dtype)
+        return (loss_video_per_sample * video_weight).mean() + zero_anchor
+
+    def _compute_idm_action_loss(
+        self,
+        input_latents: torch.Tensor,
+        prep: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        device = input_latents.device
+        action = prep['action']
+        batch_size = int(input_latents.shape[0])
+
+        noise_action = torch.randn_like(action)
+        timestep_action = self.train_action_scheduler.sample_training_t(
+            batch_size=batch_size, device=device, dtype=action.dtype)
+        noisy_action = self.train_action_scheduler.add_noise(
+            action, noise_action, timestep_action)
+        target_action = self.train_action_scheduler.training_target(
+            action, noise_action, timestep_action)
+
+        cond_noise_mask = torch.rand(
+            (batch_size, ), device=device) < float(self.video_cond_noise_prob)
+        timestep_video_cond = torch.zeros((batch_size, ),
+                                          dtype=input_latents.dtype,
+                                          device=device)
+        latents_cond = input_latents
+        if bool(cond_noise_mask.any()):
+            timestep_video_cond_sampled = \
+                self.train_video_scheduler.sample_training_t(
+                    batch_size=batch_size,
+                    device=device,
+                    dtype=input_latents.dtype)
+            timestep_video_cond = torch.where(cond_noise_mask,
+                                              timestep_video_cond_sampled,
+                                              timestep_video_cond)
+            noise_video_cond = torch.randn_like(input_latents)
+            latents_cond_noisy = self.train_video_scheduler.add_noise(
+                input_latents, noise_video_cond, timestep_video_cond_sampled)
+            cond_noise_selector = cond_noise_mask.view(batch_size, 1, 1, 1, 1)
+            latents_cond = torch.where(cond_noise_selector, latents_cond_noisy,
+                                       input_latents)
+        if prep['first_frame_latents'] is not None:
+            latents_cond = latents_cond.clone()
+            latents_cond[:, :, 0:1] = prep['first_frame_latents']
+
+        video_pre_cond = self.video_expert.pre_dit(
+            x=latents_cond,
+            timestep=timestep_video_cond,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+            action=None,
+            fuse_vae_embedding_in_latents=prep['fuse_flag'],
+        )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=noisy_action,
+            timestep=timestep_action,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+        )
+        if video_pre_cond['t_mod'].ndim != 4:
+            raise ValueError(
+                'IDM branch requires token-wise video `t_mod`; ensure '
+                '`seperated_timestep=true` and '
+                '`fuse_vae_embedding_in_latents=true`.')
+
+        attention_mask = self._build_policy_attention_mask(
+            video_seq_len=video_pre_cond['tokens'].shape[1],
+            action_seq_len=action_pre['tokens'].shape[1],
+            video_tokens_per_frame=int(
+                video_pre_cond['meta']['tokens_per_frame']),
+            device=video_pre_cond['tokens'].device,
+        )
+        tokens_out = self.mot(
+            embeds_all={
+                'video': video_pre_cond['tokens'],
+                'action': action_pre['tokens'],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                'video': video_pre_cond['freqs'],
+                'action': action_pre['freqs'],
+            },
+            context_all={
+                'video': {
+                    'context': video_pre_cond['context'],
+                    'mask': video_pre_cond['context_mask'],
+                },
+                'action': {
+                    'context': action_pre['context'],
+                    'mask': action_pre['context_mask'],
+                },
+            },
+            t_mod_all={
+                'video': video_pre_cond['t_mod'],
+                'action': action_pre['t_mod'],
+            },
+        )
+        pred_action = self.action_expert.post_dit(tokens_out['action'],
+                                                  action_pre)
+        zero_anchor = self.video_expert.post_dit(
+            tokens_out['video'], video_pre_cond).float().sum() * 0.0
+        return self._compute_action_loss(
+            pred_action=pred_action,
+            target_action=target_action,
+            timestep_action=timestep_action,
+            action_is_pad=prep['action_is_pad'],
+        ) + zero_anchor
+
+    def _compute_policy_action_loss(
+        self,
+        input_latents: torch.Tensor,
+        prep: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        first_frame_latents = prep['first_frame_latents']
+        if first_frame_latents is None:
+            first_frame_latents = input_latents[:, :, 0:1]
+
+        device = input_latents.device
+        action = prep['action']
+        batch_size = int(action.shape[0])
+        noise_action = torch.randn_like(action)
+        timestep_action = self.train_action_scheduler.sample_training_t(
+            batch_size=batch_size, device=device, dtype=action.dtype)
+        noisy_action = self.train_action_scheduler.add_noise(
+            action, noise_action, timestep_action)
+        target_action = self.train_action_scheduler.training_target(
+            action, noise_action, timestep_action)
+
+        timestep_video = torch.zeros((batch_size, ),
+                                     dtype=first_frame_latents.dtype,
+                                     device=device)
+        video_pre = self.video_expert.pre_dit(
+            x=first_frame_latents,
+            timestep=timestep_video,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+            action=None,
+            fuse_vae_embedding_in_latents=prep['fuse_flag'],
+        )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=noisy_action,
+            timestep=timestep_action,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+        )
+        attention_mask = self._build_policy_attention_mask(
+            video_seq_len=video_pre['tokens'].shape[1],
+            action_seq_len=action_pre['tokens'].shape[1],
+            video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
+            device=video_pre['tokens'].device,
+        )
+        tokens_out = self.mot(
+            embeds_all={
+                'video': video_pre['tokens'],
+                'action': action_pre['tokens'],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                'video': video_pre['freqs'],
+                'action': action_pre['freqs'],
+            },
+            context_all={
+                'video': {
+                    'context': video_pre['context'],
+                    'mask': video_pre['context_mask'],
+                },
+                'action': {
+                    'context': action_pre['context'],
+                    'mask': action_pre['context_mask'],
+                },
+            },
+            t_mod_all={
+                'video': video_pre['t_mod'],
+                'action': action_pre['t_mod'],
+            },
+        )
+        pred_action = self.action_expert.post_dit(tokens_out['action'],
+                                                  action_pre)
+        zero_anchor = self.video_expert.post_dit(tokens_out['video'],
+                                                 video_pre).float().sum() * 0.0
+        return self._compute_action_loss(
+            pred_action=pred_action,
+            target_action=target_action,
+            timestep_action=timestep_action,
+            action_is_pad=prep['action_is_pad'],
+        ) + zero_anchor
+
+    def forward(
+        self,
+        input_latents: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        action: torch.Tensor,
+        action_is_pad: Optional[torch.Tensor] = None,
+        image_is_pad: Optional[torch.Tensor] = None,
+        proprio: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        prep = self._prepare_training_inputs(
+            input_latents=input_latents,
+            context=context,
+            context_mask=context_mask,
+            action=action,
+            action_is_pad=action_is_pad,
+            image_is_pad=image_is_pad,
+            proprio=proprio,
+        )
+        mode = self._sample_training_mode(input_latents.device)
+        if mode == 'forward':
+            branch_loss = self._compute_forward_video_loss(input_latents, prep)
+            loss_total = self.loss_lambda_forward_video * branch_loss
+        elif mode == 'idm':
+            branch_loss = self._compute_idm_action_loss(input_latents, prep)
+            loss_total = self.loss_lambda_idm_action * branch_loss
+        elif mode == 'policy':
+            branch_loss = self._compute_policy_action_loss(input_latents, prep)
+            loss_total = self.loss_lambda_policy_action * branch_loss
+        else:
+            raise ValueError(f'Unsupported training mode: {mode}')
+
+        detached = loss_total.detach()
+        zero = detached.new_zeros(())
+        return {
+            'loss':
+            loss_total,
+            'loss_forward_video':
+            detached if mode == 'forward' else zero,
+            'loss_idm_action':
+            detached if mode == 'idm' else zero,
+            'loss_policy_action':
+            detached if mode == 'policy' else zero,
+            'loss_mode_forward':
+            detached.new_tensor(1.0 if mode == 'forward' else 0.0),
+            'loss_mode_idm':
+            detached.new_tensor(1.0 if mode == 'idm' else 0.0),
+            'loss_mode_policy':
+            detached.new_tensor(1.0 if mode == 'policy' else 0.0),
+        }
+
+    @torch.no_grad()
+    def predict_action(
+        self,
+        first_frame_latents: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        action_horizon: int,
+        video_latent_shape=None,
+        num_inference_steps: int = 20,
+        sigma_shift: Optional[float] = None,
+        seed: Optional[int] = None,
+        rand_device: str = 'cpu',
+        **kwargs,
+    ) -> torch.Tensor:
+        del video_latent_shape
+        return FastWAMHead.predict_action(
+            self,
+            first_frame_latents=first_frame_latents,
+            context=context,
+            context_mask=context_mask,
+            action_horizon=action_horizon,
+            num_inference_steps=num_inference_steps,
+            sigma_shift=sigma_shift,
+            seed=seed,
+            rand_device=rand_device,
+            **kwargs,
+        )
+
+    @torch.no_grad()
+    def _predict_forward_video_noise(
+        self,
+        latents_video: torch.Tensor,
+        action: torch.Tensor,
+        timestep_video: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        fuse_vae_embedding_in_latents: bool,
+    ) -> torch.Tensor:
+        timestep_action = torch.zeros((action.shape[0], ),
+                                      dtype=action.dtype,
+                                      device=latents_video.device)
+        video_pre = self.video_expert.pre_dit(
+            x=latents_video,
+            timestep=timestep_video,
+            context=context,
+            context_mask=context_mask,
+            action=None,
+            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+        )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=action,
+            timestep=timestep_action,
+            context=context,
+            context_mask=context_mask,
+        )
+        attention_mask = self._build_forward_attention_mask(
+            video_seq_len=video_pre['tokens'].shape[1],
+            action_seq_len=action_pre['tokens'].shape[1],
+            video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
+            device=video_pre['tokens'].device,
+        )
+        tokens_out = self.mot(
+            embeds_all={
+                'video': video_pre['tokens'],
+                'action': action_pre['tokens'],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                'video': video_pre['freqs'],
+                'action': action_pre['freqs'],
+            },
+            context_all={
+                'video': {
+                    'context': video_pre['context'],
+                    'mask': video_pre['context_mask'],
+                },
+                'action': {
+                    'context': action_pre['context'],
+                    'mask': action_pre['context_mask'],
+                },
+            },
+            t_mod_all={
+                'video': video_pre['t_mod'],
+                'action': action_pre['t_mod'],
+            },
+        )
+        return self.video_expert.post_dit(tokens_out['video'], video_pre)
+
+    @torch.no_grad()
+    def predict_video_action(
+        self,
+        first_frame_latents: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        action_horizon: int,
+        video_latent_shape,
+        action: Optional[torch.Tensor] = None,
+        num_inference_steps: int = 20,
+        sigma_shift: Optional[float] = None,
+        seed: Optional[int] = None,
+        rand_device: str = 'cpu',
+        **kwargs,
+    ):
+        self.eval()
+        if video_latent_shape is None:
+            raise ValueError(
+                '`video_latent_shape` is required for '
+                'FastWAMPolicyForwardIDMHead.predict_video_action.')
+
+        device = first_frame_latents.device
+        if action is None:
+            pred_action = self.predict_action(
+                first_frame_latents=first_frame_latents,
+                context=context,
+                context_mask=context_mask,
+                action_horizon=action_horizon,
+                num_inference_steps=num_inference_steps,
+                sigma_shift=sigma_shift,
+                seed=seed,
+                rand_device=rand_device,
+                **kwargs,
+            )
+            if pred_action.ndim == 2:
+                action_for_forward = pred_action.unsqueeze(0)
+                action_out = pred_action.detach().to(
+                    device='cpu', dtype=torch.float32)
+            else:
+                action_for_forward = pred_action
+                action_out = pred_action[0].detach().to(
+                    device='cpu', dtype=torch.float32)
+        else:
+            action_for_forward = action
+            if action_for_forward.ndim == 2:
+                action_for_forward = action_for_forward.unsqueeze(0)
+            if (action_for_forward.ndim != 3
+                    or action_for_forward.shape[0] != 1
+                    or action_for_forward.shape[1] != action_horizon):
+                raise ValueError(
+                    '`action` must have shape [T, D] or [1, T, D] with '
+                    f'action_horizon={action_horizon}, got '
+                    f'{tuple(action_for_forward.shape)}')
+            if action_for_forward.shape[2] != self.action_expert.action_dim:
+                raise ValueError(f'`action` last dim must be '
+                                 f'{self.action_expert.action_dim}, got '
+                                 f'{action_for_forward.shape[2]}')
+            action_for_forward = action_for_forward.to(
+                device=device, dtype=self.torch_dtype)
+            action_out = action_for_forward[0].detach().to(
+                device='cpu', dtype=torch.float32)
+
+        z_dim, latent_t, latent_h, latent_w = video_latent_shape
+        generator = (None if seed is None else torch.Generator(
+            device=rand_device).manual_seed(seed))
+        latents_video = torch.randn(
+            (1, z_dim, latent_t, latent_h, latent_w),
+            generator=generator,
+            device=rand_device,
+            dtype=torch.float32,
+        ).to(
+            device=device, dtype=self.torch_dtype)
+        latents_video[:, :, 0:1] = first_frame_latents.clone()
+        fuse_flag = bool(
+            getattr(self.video_expert, 'fuse_vae_embedding_in_latents', False))
+
+        infer_timesteps_video, infer_deltas_video = \
+            self.infer_video_scheduler.build_inference_schedule(
+                num_inference_steps=num_inference_steps,
+                device=device,
+                dtype=latents_video.dtype,
+                shift_override=sigma_shift,
+            )
+        for step_t_video, step_delta_video in zip(infer_timesteps_video,
+                                                  infer_deltas_video):
+            timestep_video = step_t_video.unsqueeze(0).to(
+                dtype=latents_video.dtype, device=device)
+            pred_video = self._predict_forward_video_noise(
+                latents_video=latents_video,
+                action=action_for_forward,
+                timestep_video=timestep_video,
+                context=context,
+                context_mask=context_mask,
+                fuse_vae_embedding_in_latents=fuse_flag,
+            )
+            latents_video = self.infer_video_scheduler.step(
+                pred_video, step_delta_video, latents_video)
+            latents_video[:, :, 0:1] = first_frame_latents.clone()
+
+        return latents_video, action_out

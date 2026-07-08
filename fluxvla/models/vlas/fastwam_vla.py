@@ -51,7 +51,9 @@ class FastWAMVLA(BaseVLA):
       action-inference logic. The head variant is selected by
       ``vla_head.type`` and built through the ``HEADS`` registry
       (:class:`FastWAMHead` for ``uncond``, :class:`FastWAMJointHead` for
-      ``joint``, :class:`FastWAMIDMHead` for ``idm``).
+      ``joint``, :class:`FastWAMIDMHead` for ``idm``, and
+      :class:`FastWAMPolicyForwardIDMHead` for random-mode forward / IDM /
+      policy training).
 
     The Wan2.2 components are loaded once via the vendored FastWAM loader and
     injected into the backbone and head, so the encoders and the diffusion
@@ -215,6 +217,12 @@ class FastWAMVLA(BaseVLA):
                 action_scheduler.get('num_train_timesteps', 1000)),
             loss_lambda_video=float(loss.get('lambda_video', 1.0)),
             loss_lambda_action=float(loss.get('lambda_action', 1.0)),
+            loss_lambda_forward_video=float(
+                loss.get('lambda_forward_video', 1.0)),
+            loss_lambda_idm_action=float(loss.get('lambda_idm_action', 1.0)),
+            loss_lambda_policy_action=float(
+                loss.get('lambda_policy_action', 1.0)),
+            mode_probs=head_cfg.get('mode_probs'),
             device=device,
             torch_dtype=self.torch_dtype,
         )

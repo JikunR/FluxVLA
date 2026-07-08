@@ -26,6 +26,7 @@ except ImportError:
 
 try:
     from .fastwam_head import FastWAMIDMHead  # noqa: F401
+    from .fastwam_head import FastWAMPolicyForwardIDMHead  # noqa: F401
     from .fastwam_head import FastWAMHead, FastWAMJointHead  # noqa: F401
 except ImportError:
     pass
