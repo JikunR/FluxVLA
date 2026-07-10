@@ -1452,6 +1452,7 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         loss_lambda_idm_action: float = 1.0,
         loss_lambda_policy_action: float = 1.0,
         mode_probs: Optional[Dict[str, float]] = None,
+        broadcast_training_mode: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -1459,6 +1460,7 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         self.loss_lambda_idm_action = float(loss_lambda_idm_action)
         self.loss_lambda_policy_action = float(loss_lambda_policy_action)
         self.mode_probs = self._normalize_mode_probs(mode_probs)
+        self.broadcast_training_mode = bool(broadcast_training_mode)
         self._validate_policy_forward_idm_config()
 
     def _validate_policy_forward_idm_config(self) -> None:
@@ -1510,8 +1512,8 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
             device=device,
             dtype=torch.float32,
         )
-        if torch.distributed.is_available() and \
-                torch.distributed.is_initialized():
+        if (self.broadcast_training_mode and torch.distributed.is_available()
+                and torch.distributed.is_initialized()):
             backend = str(torch.distributed.get_backend()).lower()
             idx_device = torch.device('cpu') if backend == 'gloo' else device
             idx_tensor = torch.empty((), device=idx_device, dtype=torch.long)

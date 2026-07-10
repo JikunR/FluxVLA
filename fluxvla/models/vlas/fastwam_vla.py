@@ -223,6 +223,8 @@ class FastWAMVLA(BaseVLA):
             loss_lambda_policy_action=float(
                 loss.get('lambda_policy_action', 1.0)),
             mode_probs=head_cfg.get('mode_probs'),
+            broadcast_training_mode=bool(
+                head_cfg.get('broadcast_training_mode', True)),
             device=device,
             torch_dtype=self.torch_dtype,
         )
