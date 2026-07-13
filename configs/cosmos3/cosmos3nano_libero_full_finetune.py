@@ -338,6 +338,7 @@ runner = dict(
         lr=_base_lr,
         type='AdamW',
         weight_decay=0.05,
+        disable_weight_decay_for_1d_params=False,
         betas=(0.9, 0.99),
         eps=1e-8,
         fused=True,

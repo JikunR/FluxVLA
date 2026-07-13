@@ -210,6 +210,8 @@ class BaseTrainRunner(ABC):
                 normalized_cfg['weight_decay'])
         normalized_cfg['paramwise_learning_rate'] = dict(
             normalized_cfg.get('paramwise_learning_rate', {}) or {})
+        normalized_cfg['disable_weight_decay_for_1d_params'] = bool(
+            normalized_cfg.get('disable_weight_decay_for_1d_params', True))
         return normalized_cfg
 
     def _prepare_batch(self,

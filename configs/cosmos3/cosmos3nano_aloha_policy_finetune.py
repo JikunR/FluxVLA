@@ -356,7 +356,11 @@ runner = dict(
     type='FSDPTrainRunner',
     max_steps=None,
     max_epochs=6,
-    optimizer=dict(lr=1e-4, type='AdamW', weight_decay=0.05),
+    optimizer=dict(
+        lr=1e-4,
+        type='AdamW',
+        weight_decay=0.05,
+        disable_weight_decay_for_1d_params=False),
     max_grad_norm=1.0,
     save_iter_interval=1000,
     max_keep_ckpts=3,

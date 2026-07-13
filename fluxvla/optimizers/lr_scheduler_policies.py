@@ -62,6 +62,8 @@ class BaseLRSchedulerPolicy:
     def build_param_groups(self, runner, weight_decay=None):
         optimizer_cfg = runner.optimizer_cfg
         paramwise_lr = optimizer_cfg.get('paramwise_learning_rate', {})
+        disable_weight_decay_for_1d_params = optimizer_cfg.get(
+            'disable_weight_decay_for_1d_params', True)
         if weight_decay is None:
             weight_decay = optimizer_cfg.get('weight_decay')
         if not paramwise_lr and weight_decay is None:
@@ -74,7 +76,8 @@ class BaseLRSchedulerPolicy:
             for name, param in runner.vla.named_parameters():
                 if not param.requires_grad:
                     continue
-                if param.ndim <= 1 or name.endswith('.bias'):
+                if (disable_weight_decay_for_1d_params
+                        and (param.ndim <= 1 or name.endswith('.bias'))):
                     no_decay.append(param)
                 else:
                     decay.append(param)
@@ -92,8 +95,9 @@ class BaseLRSchedulerPolicy:
                 continue
             lr = self._get_param_lr(runner, name)
             decay = 0.0
-            if (weight_decay is not None and param.ndim > 1
-                    and not name.endswith('.bias')):
+            if (weight_decay is not None
+                    and (not disable_weight_decay_for_1d_params or
+                         (param.ndim > 1 and not name.endswith('.bias')))):
                 decay = float(weight_decay)
             key = (lr, decay)
             if key not in groups:
@@ -110,6 +114,7 @@ class BaseLRSchedulerPolicy:
         optimizer_kwargs = dict(optimizer_cfg)
         optimizer_kwargs.pop('paramwise_learning_rate', None)
         optimizer_kwargs.pop('weight_decay', None)
+        optimizer_kwargs.pop('disable_weight_decay_for_1d_params', None)
         return optimizer_kwargs
 
     def build_optimizer(self, runner, weight_decay=None):
