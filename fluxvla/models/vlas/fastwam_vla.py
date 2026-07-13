@@ -225,6 +225,10 @@ class FastWAMVLA(BaseVLA):
             mode_probs=head_cfg.get('mode_probs'),
             broadcast_training_mode=bool(
                 head_cfg.get('broadcast_training_mode', True)),
+            sample_mode_in_forward=bool(
+                head_cfg.get('sample_mode_in_forward', True)),
+            unified_training_forward=bool(
+                head_cfg.get('unified_training_forward', False)),
             device=device,
             torch_dtype=self.torch_dtype,
         )
@@ -243,6 +247,7 @@ class FastWAMVLA(BaseVLA):
         action_masks: Optional[torch.Tensor] = None,
         frame_masks: Optional[torch.Tensor] = None,
         img_masks: Optional[torch.Tensor] = None,
+        training_mode: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         if images is None or context is None or context_mask is None \
@@ -290,6 +295,7 @@ class FastWAMVLA(BaseVLA):
             action_is_pad=action_is_pad,
             image_is_pad=image_is_pad,
             proprio=proprio,
+            training_mode=training_mode,
         )
 
     # ------------------------------------------------------------------

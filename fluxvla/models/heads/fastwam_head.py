@@ -1453,6 +1453,8 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         loss_lambda_policy_action: float = 1.0,
         mode_probs: Optional[Dict[str, float]] = None,
         broadcast_training_mode: bool = True,
+        sample_mode_in_forward: bool = True,
+        unified_training_forward: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -1461,6 +1463,8 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         self.loss_lambda_policy_action = float(loss_lambda_policy_action)
         self.mode_probs = self._normalize_mode_probs(mode_probs)
         self.broadcast_training_mode = bool(broadcast_training_mode)
+        self.sample_mode_in_forward = bool(sample_mode_in_forward)
+        self.unified_training_forward = bool(unified_training_forward)
         self._validate_policy_forward_idm_config()
 
     def _validate_policy_forward_idm_config(self) -> None:
@@ -1528,6 +1532,37 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         idx = int(torch.multinomial(probs, num_samples=1).item())
         return self.valid_training_modes[idx]
 
+    def _select_training_mode(
+        self,
+        training_mode: Optional[torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+    ) -> str:
+        if self.sample_mode_in_forward:
+            return self._sample_training_mode(device=device)
+        if training_mode is None:
+            raise ValueError('`training_mode` must be provided when '
+                             '`sample_mode_in_forward=False`.')
+
+        mode_ids = training_mode.to(
+            device=device, dtype=torch.long).reshape(-1)
+        if mode_ids.numel() == 1:
+            mode_ids = mode_ids.expand(batch_size)
+        elif mode_ids.numel() != batch_size:
+            raise ValueError(
+                f'`training_mode` must have 1 or {batch_size} values, got '
+                f'{mode_ids.numel()}.')
+        if not bool((mode_ids == mode_ids[0]).all().item()):
+            raise ValueError(
+                'FastWAMPolicyForwardIDMHead expects one training mode per '
+                'optimizer step.')
+        mode_idx = int(mode_ids[0].item())
+        if mode_idx < 0 or mode_idx >= len(self.valid_training_modes):
+            raise ValueError(
+                f'Unsupported training mode id {mode_idx}; expected 0..'
+                f'{len(self.valid_training_modes) - 1}.')
+        return self.valid_training_modes[mode_idx]
+
     @torch.no_grad()
     def _build_forward_attention_mask(
         self,
@@ -1572,6 +1607,61 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         mask[video_seq_len:, video_seq_len:] = True
         mask[video_seq_len:, :video_seq_len] = True
         return mask
+
+    @torch.no_grad()
+    def _build_unified_policy_attention_mask(
+        self,
+        video_seq_len: int,
+        action_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        total_seq_len = video_seq_len + action_seq_len
+        mask = torch.zeros((total_seq_len, total_seq_len),
+                           dtype=torch.bool,
+                           device=device)
+        mask[:video_seq_len, :video_seq_len] = \
+            self.video_expert.build_video_to_video_mask(
+                video_seq_len=video_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=device,
+            )
+        mask[video_seq_len:, video_seq_len:] = True
+        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
+        mask[video_seq_len:, :first_frame_tokens] = True
+        return mask
+
+    @torch.no_grad()
+    def _build_unified_training_attention_mask(
+        self,
+        mode: str,
+        video_seq_len: int,
+        action_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if mode == 'forward':
+            return self._build_forward_attention_mask(
+                video_seq_len=video_seq_len,
+                action_seq_len=action_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=device,
+            )
+        if mode == 'idm':
+            return self._build_policy_attention_mask(
+                video_seq_len=video_seq_len,
+                action_seq_len=action_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=device,
+            )
+        if mode == 'policy':
+            return self._build_unified_policy_attention_mask(
+                video_seq_len=video_seq_len,
+                action_seq_len=action_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=device,
+            )
+        raise ValueError(f'Unsupported training mode: {mode}')
 
     @torch.no_grad()
     def _build_mot_attention_mask(
@@ -1866,6 +1956,211 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
             action_is_pad=prep['action_is_pad'],
         ) + zero_anchor
 
+    def _compute_action_loss_per_sample(
+        self,
+        pred_action: torch.Tensor,
+        target_action: torch.Tensor,
+        action_is_pad: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        action_loss_token = F.mse_loss(
+            pred_action.float(),
+            target_action.float(),
+            reduction='none',
+        ).mean(dim=2)
+        if action_is_pad is not None:
+            valid = (~action_is_pad).to(
+                device=action_loss_token.device, dtype=action_loss_token.dtype)
+            valid_sum = valid.sum(dim=1).clamp(min=1.0)
+            return (action_loss_token * valid).sum(dim=1) / valid_sum
+        return action_loss_token.mean(dim=1)
+
+    def _forward_unified_training(
+        self,
+        input_latents: torch.Tensor,
+        prep: Dict[str, torch.Tensor],
+        training_mode: Optional[torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        mode = self._select_training_mode(
+            training_mode=training_mode,
+            batch_size=int(input_latents.shape[0]),
+            device=input_latents.device,
+        )
+        batch_size_int = int(input_latents.shape[0])
+        device = input_latents.device
+        is_forward = mode == 'forward'
+        is_idm = mode == 'idm'
+        is_policy = mode == 'policy'
+
+        video_noise = torch.randn_like(input_latents)
+        sampled_timestep_video = self.train_video_scheduler.sample_training_t(
+            batch_size=batch_size_int,
+            device=device,
+            dtype=input_latents.dtype,
+        )
+        noisy_video = self.train_video_scheduler.add_noise(
+            input_latents, video_noise, sampled_timestep_video)
+        target_video = self.train_video_scheduler.training_target(
+            input_latents, video_noise, sampled_timestep_video)
+
+        zero_timestep_video = torch.zeros((batch_size_int, ),
+                                          dtype=input_latents.dtype,
+                                          device=device)
+        idm_cond_mask = (
+            torch.rand((batch_size_int, ), device=device) < float(
+                self.video_cond_noise_prob))
+        idm_timestep_video_sampled = \
+            self.train_video_scheduler.sample_training_t(
+                batch_size=batch_size_int,
+                device=device,
+                dtype=input_latents.dtype,
+            )
+        idm_timestep_video = torch.where(idm_cond_mask,
+                                         idm_timestep_video_sampled,
+                                         zero_timestep_video)
+        idm_video_noise = torch.randn_like(input_latents)
+        idm_noisy_video = self.train_video_scheduler.add_noise(
+            input_latents, idm_video_noise, idm_timestep_video_sampled)
+        idm_video_selector = idm_cond_mask.view(batch_size_int, 1, 1, 1, 1)
+        idm_video = torch.where(idm_video_selector, idm_noisy_video,
+                                input_latents)
+
+        if is_forward:
+            latents_video = noisy_video
+            timestep_video = sampled_timestep_video
+        elif is_idm:
+            latents_video = idm_video
+            timestep_video = idm_timestep_video
+        else:
+            latents_video = input_latents
+            timestep_video = zero_timestep_video
+
+        if prep['first_frame_latents'] is not None:
+            latents_video = torch.cat(
+                [prep['first_frame_latents'], latents_video[:, :, 1:]],
+                dim=2,
+            )
+
+        action = prep['action']
+        action_noise = torch.randn_like(action)
+        sampled_timestep_action = \
+            self.train_action_scheduler.sample_training_t(
+                batch_size=batch_size_int,
+                device=device,
+                dtype=action.dtype,
+            )
+        noisy_action = self.train_action_scheduler.add_noise(
+            action, action_noise, sampled_timestep_action)
+        target_action = self.train_action_scheduler.training_target(
+            action, action_noise, sampled_timestep_action)
+        zero_timestep_action = torch.zeros((batch_size_int, ),
+                                           dtype=action.dtype,
+                                           device=device)
+        latents_action = action if is_forward else noisy_action
+        timestep_action = (
+            zero_timestep_action if is_forward else sampled_timestep_action)
+
+        video_pre = self.video_expert.pre_dit(
+            x=latents_video,
+            timestep=timestep_video,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+            action=None,
+            fuse_vae_embedding_in_latents=prep['fuse_flag'],
+        )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=latents_action,
+            timestep=timestep_action,
+            context=prep['context'],
+            context_mask=prep['context_mask'],
+        )
+        attention_mask = self._build_unified_training_attention_mask(
+            mode=mode,
+            video_seq_len=video_pre['tokens'].shape[1],
+            action_seq_len=action_pre['tokens'].shape[1],
+            video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
+            device=video_pre['tokens'].device,
+        )
+        tokens_out = self.mot(
+            embeds_all={
+                'video': video_pre['tokens'],
+                'action': action_pre['tokens'],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                'video': video_pre['freqs'],
+                'action': action_pre['freqs'],
+            },
+            context_all={
+                'video': {
+                    'context': video_pre['context'],
+                    'mask': video_pre['context_mask'],
+                },
+                'action': {
+                    'context': action_pre['context'],
+                    'mask': action_pre['context_mask'],
+                },
+            },
+            t_mod_all={
+                'video': video_pre['t_mod'],
+                'action': action_pre['t_mod'],
+            },
+        )
+        pred_video = self.video_expert.post_dit(tokens_out['video'], video_pre)
+        pred_action = self.action_expert.post_dit(tokens_out['action'],
+                                                  action_pre)
+
+        include_initial_video_step = prep['first_frame_latents'] is None
+        if prep['first_frame_latents'] is not None:
+            pred_video = pred_video[:, :, 1:]
+            target_video = target_video[:, :, 1:]
+
+        video_loss_per_sample = self._compute_video_loss_per_sample(
+            pred_video=pred_video,
+            target_video=target_video,
+            image_is_pad=prep['image_is_pad'],
+            include_initial_video_step=include_initial_video_step,
+        )
+        video_weight = self.train_video_scheduler.training_weight(
+            sampled_timestep_video).to(
+                video_loss_per_sample.device,
+                dtype=video_loss_per_sample.dtype)
+        weighted_video_loss = video_loss_per_sample * video_weight
+
+        action_loss_per_sample = self._compute_action_loss_per_sample(
+            pred_action=pred_action,
+            target_action=target_action,
+            action_is_pad=prep['action_is_pad'],
+        )
+        action_weight = self.train_action_scheduler.training_weight(
+            sampled_timestep_action).to(
+                action_loss_per_sample.device,
+                dtype=action_loss_per_sample.dtype)
+        weighted_action_loss = action_loss_per_sample * action_weight
+
+        zero = weighted_video_loss.detach().new_zeros(())
+        loss_forward_video = (
+            self.loss_lambda_forward_video *
+            weighted_video_loss.mean() if is_forward else zero)
+        loss_idm_action = (
+            self.loss_lambda_idm_action *
+            weighted_action_loss.mean() if is_idm else zero)
+        loss_policy_action = (
+            self.loss_lambda_policy_action *
+            weighted_action_loss.mean() if is_policy else zero)
+        loss_total = loss_forward_video + loss_idm_action + loss_policy_action
+
+        detached = loss_total.detach()
+        return {
+            'loss': loss_total,
+            'loss_forward_video': loss_forward_video.detach(),
+            'loss_idm_action': loss_idm_action.detach(),
+            'loss_policy_action': loss_policy_action.detach(),
+            'loss_mode_forward':
+            detached.new_tensor(1.0 if is_forward else 0.0),
+            'loss_mode_idm': detached.new_tensor(1.0 if is_idm else 0.0),
+            'loss_mode_policy': detached.new_tensor(1.0 if is_policy else 0.0),
+        }
+
     def forward(
         self,
         input_latents: torch.Tensor,
@@ -1875,6 +2170,7 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
         action_is_pad: Optional[torch.Tensor] = None,
         image_is_pad: Optional[torch.Tensor] = None,
         proprio: Optional[torch.Tensor] = None,
+        training_mode: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         prep = self._prepare_training_inputs(
@@ -1886,7 +2182,18 @@ class FastWAMPolicyForwardIDMHead(FastWAMIDMHead):
             image_is_pad=image_is_pad,
             proprio=proprio,
         )
-        mode = self._sample_training_mode(input_latents.device)
+        if self.unified_training_forward:
+            return self._forward_unified_training(
+                input_latents=input_latents,
+                prep=prep,
+                training_mode=training_mode,
+            )
+
+        mode = self._select_training_mode(
+            training_mode=training_mode,
+            batch_size=int(input_latents.shape[0]),
+            device=input_latents.device,
+        )
         if mode == 'forward':
             branch_loss = self._compute_forward_video_loss(input_latents, prep)
             loss_total = self.loss_lambda_forward_video * branch_loss

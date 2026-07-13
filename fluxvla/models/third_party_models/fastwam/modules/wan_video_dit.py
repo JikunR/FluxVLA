@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 from typing import Any, Dict, Tuple, Optional
 from einops import rearrange
@@ -10,17 +9,149 @@ from ._logging import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    from flash_attn import flash_attn_func as _flash_attn_func
+except Exception:
+    _flash_attn_func = None
+
+
+def _can_use_flash2(q: torch.Tensor, k: torch.Tensor,
+                    v: torch.Tensor) -> bool:
+    return (_flash_attn_func is not None and q.is_cuda and k.is_cuda
+            and v.is_cuda and q.dtype in (torch.float16, torch.bfloat16)
+            and k.dtype == q.dtype and v.dtype == q.dtype)
+
+
+def _flash2_unavailable_reason(q: torch.Tensor, k: torch.Tensor,
+                               v: torch.Tensor) -> str:
+    reasons = []
+    if _flash_attn_func is None:
+        reasons.append('flash_attn_func is not importable')
+    if not (q.is_cuda and k.is_cuda and v.is_cuda):
+        reasons.append(
+            f'q/k/v must be CUDA tensors, got {q.device}/{k.device}/{v.device}')
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        reasons.append(f'q dtype must be fp16 or bf16, got {q.dtype}')
+    if k.dtype != q.dtype or v.dtype != q.dtype:
+        reasons.append(f'q/k/v dtypes must match, got '
+                       f'{q.dtype}/{k.dtype}/{v.dtype}')
+    return '; '.join(reasons) or 'unknown reason'
+
+
+def _mask_description(mask: Optional[torch.Tensor]) -> str:
+    if mask is None:
+        return 'None'
+    return f'shape={tuple(mask.shape)}, dtype={mask.dtype}, device={mask.device}'
+
+
+def _flash2_attention(q: torch.Tensor,
+                      k: torch.Tensor,
+                      v: torch.Tensor,
+                      *,
+                      causal: bool = False) -> torch.Tensor:
+    return _flash_attn_func(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        dropout_p=0.0,
+        causal=causal,
+    )
+
+
+def _is_standard_causal_mask(mask: torch.Tensor) -> bool:
+    if mask.ndim != 2 or mask.shape[0] != mask.shape[1]:
+        return False
+    causal = torch.ones_like(mask, dtype=torch.bool).tril()
+    return bool(torch.equal(mask.to(dtype=torch.bool), causal))
+
+
+def _flash2_attention_with_2d_mask(q: torch.Tensor, k: torch.Tensor,
+                                  v: torch.Tensor,
+                                  mask: torch.Tensor) -> Optional[torch.Tensor]:
+    q_len = q.shape[1]
+    k_len = k.shape[1]
+    if mask.shape != (q_len, k_len):
+        return None
+
+    mask = mask.to(device=q.device, dtype=torch.bool)
+    if bool(mask.all().item()):
+        return _flash2_attention(q, k, v)
+    if q_len == k_len and _is_standard_causal_mask(mask):
+        return _flash2_attention(q, k, v, causal=True)
+
+    patterns, inverse = torch.unique(mask, dim=0, return_inverse=True)
+    if not bool(patterns.any(dim=1).all().item()):
+        return None
+
+    out = torch.empty_like(q)
+    for group_idx in range(patterns.shape[0]):
+        row_idx = (inverse == group_idx).nonzero(as_tuple=False).flatten()
+        col_idx = patterns[group_idx].nonzero(as_tuple=False).flatten()
+        attn_out = _flash2_attention(
+            q.index_select(1, row_idx),
+            k.index_select(1, col_idx),
+            v.index_select(1, col_idx),
+        )
+        out.index_copy_(1, row_idx, attn_out)
+    return out
+
+
+def _flash2_attention_with_batched_mask(
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+        mask: torch.Tensor) -> Optional[torch.Tensor]:
+    if mask.ndim != 4 or mask.shape[1] != 1:
+        return None
+    mask = mask[:, 0]
+    if mask.shape != (q.shape[0], q.shape[1], k.shape[1]):
+        return None
+
+    mask = mask.to(device=q.device, dtype=torch.bool)
+    if bool(mask.all().item()):
+        return _flash2_attention(q, k, v)
+
+    out = torch.empty_like(q)
+    for batch_idx in range(q.shape[0]):
+        batch_out = _flash2_attention_with_2d_mask(
+            q[batch_idx:batch_idx + 1],
+            k[batch_idx:batch_idx + 1],
+            v[batch_idx:batch_idx + 1],
+            mask[batch_idx],
+        )
+        if batch_out is None:
+            return None
+        out[batch_idx:batch_idx + 1] = batch_out
+    return out
+
 
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, ctx_mask: Optional[torch.Tensor] = None, compatibility_mode=True):
-    if compatibility_mode:
-        q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
-        k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
-        v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=ctx_mask)
-        x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
-        return x
-    else:
-        raise NotImplementedError("Only compatibility mode is implemented for flash attention. Please set compatibility_mode=True.")
+    if not compatibility_mode:
+        raise NotImplementedError('Only compatibility mode is implemented for flash attention. Please set compatibility_mode=True.')
+
+    if not _can_use_flash2(q, k, v):
+        raise RuntimeError('FlashAttention2 is required for WAM attention; '
+                           f'fallback is disabled: '
+                           f'{_flash2_unavailable_reason(q, k, v)}.')
+
+    q_flash = rearrange(q, 'b s (n d) -> b s n d', n=num_heads)
+    k_flash = rearrange(k, 'b s (n d) -> b s n d', n=num_heads)
+    v_flash = rearrange(v, 'b s (n d) -> b s n d', n=num_heads)
+    x = None
+    if ctx_mask is None:
+        x = _flash2_attention(q_flash, k_flash, v_flash)
+    elif ctx_mask.dtype == torch.bool and ctx_mask.ndim == 2:
+        x = _flash2_attention_with_2d_mask(q_flash, k_flash, v_flash,
+                                           ctx_mask)
+    elif ctx_mask.dtype == torch.bool and ctx_mask.ndim == 4:
+        x = _flash2_attention_with_batched_mask(q_flash, k_flash, v_flash,
+                                                ctx_mask)
+    if x is None:
+        raise RuntimeError(
+            'FlashAttention2 could not represent this WAM attention mask; '
+            'fallback is disabled. Supported masks are None, full/causal 2D '
+            'bool masks, grouped-row 2D bool masks, and batched 4D bool masks '
+            f'whose per-sample masks satisfy the same rule. Got '
+            f'{_mask_description(ctx_mask)}.')
+    return rearrange(x, 'b s n d -> b s (n d)', n=num_heads)
 
 
 

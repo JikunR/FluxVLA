@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Ablation: FastWAM with WAM-style unified training forward while keeping
+# FastWAM internal step mode sampling.
 
-from .dict_collator import DictCollator  # noqa: F401, F403
-from .nested_collator import NestedCollator  # noqa: F401, F403
-from .padded_action_prediction_collator import \
-    PaddedCollatorForActionPrediction  # noqa: F401, F403
-from .padded_language_modeling_collator import \
-    PaddedCollatorForLanguageModeling  # noqa: F401, F403
-from .wam_mode_collator import WAMModeCollator  # noqa: F401, F403
+_base_ = './fastwam_policy_forward_idm_per_rank_libero_10_full_finetune.py'
+
+model = dict(
+    vla_head=dict(
+        sample_mode_in_forward=True,
+        unified_training_forward=True,
+    ), )
