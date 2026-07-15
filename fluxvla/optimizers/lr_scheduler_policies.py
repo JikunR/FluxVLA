@@ -119,9 +119,17 @@ class ConstantLRScheduler(BaseLRSchedulerPolicy):
     name=['linear-warmup+cosine-decay', 'LinearWarmupCosineDecayLRScheduler'])
 class LinearWarmupCosineDecayLRScheduler(BaseLRSchedulerPolicy):
 
-    def __init__(self, warmup_ratio: float = 0.0, **kwargs) -> None:
+    def __init__(self,
+                 warmup_ratio: float = 0.0,
+                 betas: tuple = (0.9, 0.999),
+                 **kwargs) -> None:
         super().__init__(**kwargs)
         self.warmup_ratio = warmup_ratio
+        self.betas = tuple(float(beta) for beta in betas)
+
+    def build_optimizer(self, runner, weight_decay=None):
+        groups = self.build_param_groups(runner, weight_decay)
+        return AdamW(groups, lr=runner.learning_rate, betas=self.betas)
 
     def build_scheduler(self, runner, optimizer):
         num_warmup_steps = int(runner.num_training_steps * self.warmup_ratio)
