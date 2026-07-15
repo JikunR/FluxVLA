@@ -24,14 +24,20 @@ from fluxvla.wam_modes import (WAM_TRAINING_MODES, normalize_wam_mode_probs,
                                wam_mode_to_id)
 from ..backbones.vlms.wan22_loader import build_action_dit, build_wan_video_dit
 from ..third_party_models.fastwam.modules.mot import MoT
-from ..third_party_models.fastwam.modules.schedulers.scheduler_continuous import \
-    WanContinuousFlowMatchScheduler  # noqa: E501
+from ..third_party_models.fastwam.modules.schedulers import \
+    scheduler_continuous as wan_scheduler
+from .wam_semantic_world_heads import (DirectDINOFeatureHead,
+                                       SemanticQueryAdapter)
 
 __all__ = ['WAMHead']
+
+_WAN_FLOW_SCHEDULER = wan_scheduler.WanContinuousFlowMatchScheduler
 
 _WAM_HEAD_COMPONENT_BUILDERS = {
     'WanVideoDiT': build_wan_video_dit,
     'ActionDiT': build_action_dit,
+    'DirectDINOFeatureHead': DirectDINOFeatureHead,
+    'SemanticQueryAdapter': SemanticQueryAdapter,
 }
 
 
@@ -59,6 +65,8 @@ class WAMHead(nn.Module):
         self,
         video_expert: Mapping[str, Any] | nn.Module,
         action_expert: Mapping[str, Any] | nn.Module,
+        semantic_head: Optional[Mapping[str, Any] | nn.Module] = None,
+        semantic_adapter: Optional[Mapping[str, Any] | nn.Module] = None,
         mot: Optional[nn.Module] = None,
         mot_checkpoint_mixed_attn: bool = True,
         text_dim: Optional[int] = None,
@@ -79,6 +87,8 @@ class WAMHead(nn.Module):
         loss_lambda_policy_action: float = 1.0,
         loss_lambda_joint_video: float = 1.0,
         loss_lambda_joint_action: float = 1.0,
+        loss_lambda_forward_semantic: float = 0.0,
+        loss_lambda_joint_semantic: float = 0.0,
         video_cond_noise_prob: float = 0.5,
         mode_probs: Optional[Dict[str, float]] = None,
         sample_mode_in_forward: bool = False,
@@ -88,6 +98,14 @@ class WAMHead(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        if 'semantic_world_head' in kwargs:
+            raise ValueError(
+                '`vla_head.semantic_world_head` has been split into '
+                '`vla_head.semantic_head` and `vla_head.semantic_adapter`.')
+        if semantic_head is not None and semantic_adapter is not None:
+            raise ValueError(
+                'Configure only one of `vla_head.semantic_head` and '
+                '`vla_head.semantic_adapter`.')
         video_expert_config = self._extract_expert_config(
             video_expert, component_path='vla_head.video_expert')
         video_expert = self._build_component(
@@ -140,6 +158,20 @@ class WAMHead(nn.Module):
             self.proprio_encoder = None
 
         self.temporal_downsample_factor = int(temporal_downsample_factor)
+        self.semantic_head = self._build_semantic_component(
+            semantic_head,
+            video_expert=video_expert,
+            component_path='vla_head.semantic_head',
+            device=device,
+            torch_dtype=torch_dtype,
+        )
+        self.semantic_adapter = self._build_semantic_component(
+            semantic_adapter,
+            video_expert=video_expert,
+            component_path='vla_head.semantic_adapter',
+            device=device,
+            torch_dtype=torch_dtype,
+        )
 
         video_scheduler = video_scheduler or {}
         action_scheduler = action_scheduler or {}
@@ -171,20 +203,26 @@ class WAMHead(nn.Module):
         loss_lambda_joint_action = loss.get(
             'lambda_joint_action',
             loss.get('lambda_action', loss_lambda_joint_action))
+        loss_lambda_forward_semantic = loss.get(
+            'lambda_forward_semantic',
+            loss.get('lambda_forward_dino', loss_lambda_forward_semantic))
+        loss_lambda_joint_semantic = loss.get(
+            'lambda_joint_semantic',
+            loss.get('lambda_joint_dino', loss_lambda_joint_semantic))
 
-        self.train_video_scheduler = WanContinuousFlowMatchScheduler(
+        self.train_video_scheduler = _WAN_FLOW_SCHEDULER(
             num_train_timesteps=video_num_train_timesteps,
             shift=video_train_shift,
         )
-        self.infer_video_scheduler = WanContinuousFlowMatchScheduler(
+        self.infer_video_scheduler = _WAN_FLOW_SCHEDULER(
             num_train_timesteps=video_num_train_timesteps,
             shift=video_infer_shift,
         )
-        self.train_action_scheduler = WanContinuousFlowMatchScheduler(
+        self.train_action_scheduler = _WAN_FLOW_SCHEDULER(
             num_train_timesteps=action_num_train_timesteps,
             shift=action_train_shift,
         )
-        self.infer_action_scheduler = WanContinuousFlowMatchScheduler(
+        self.infer_action_scheduler = _WAN_FLOW_SCHEDULER(
             num_train_timesteps=action_num_train_timesteps,
             shift=action_infer_shift,
         )
@@ -196,6 +234,8 @@ class WAMHead(nn.Module):
         self.loss_lambda_policy_action = float(loss_lambda_policy_action)
         self.loss_lambda_joint_video = float(loss_lambda_joint_video)
         self.loss_lambda_joint_action = float(loss_lambda_joint_action)
+        self.loss_lambda_forward_semantic = float(loss_lambda_forward_semantic)
+        self.loss_lambda_joint_semantic = float(loss_lambda_joint_semantic)
         self.video_cond_noise_prob = float(video_cond_noise_prob)
         self.mode_probs = normalize_wam_mode_probs(mode_probs)
         self.sample_mode_in_forward = bool(sample_mode_in_forward)
@@ -252,6 +292,36 @@ class WAMHead(nn.Module):
         if skip_load:
             cfg['skip_load_from_pretrain'] = True
         return builder(**cfg)
+
+    @classmethod
+    def _build_semantic_component(cls, component, *, video_expert: nn.Module,
+                                  component_path: str, device: str,
+                                  torch_dtype: torch.dtype):
+        if component is None:
+            return None
+        if isinstance(component, nn.Module):
+            return component
+        if not isinstance(component, Mapping):
+            raise TypeError(
+                f'`{component_path}` must be a dict or nn.Module, got '
+                f'{type(component).__name__}.')
+        cfg = dict(component)
+        if 'hidden_dim' not in cfg:
+            hidden_dim = getattr(video_expert, 'hidden_dim', None)
+            if hidden_dim is None:
+                raise ValueError(
+                    f'`{component_path}.hidden_dim` is required when it '
+                    'cannot be inferred from `video_expert.hidden_dim`.')
+            cfg['hidden_dim'] = int(hidden_dim)
+        cfg.setdefault('device', device)
+        cfg.setdefault('torch_dtype', torch_dtype)
+        return cls._build_component(
+            cfg,
+            component_path=component_path,
+            device=device,
+            torch_dtype=torch_dtype,
+            skip_load=False,
+        )
 
     # ``video_expert`` / ``action_expert`` are stored once inside
     # ``mot.mixtures`` (avoids submodule aliasing that breaks FSDP wrapping);
@@ -924,6 +994,331 @@ class WAMHead(nn.Module):
             return (action_loss_token * valid).sum(dim=1) / valid_sum
         return action_loss_token.mean(dim=1)
 
+    @staticmethod
+    def _mode_loss(
+        per_sample_loss: torch.Tensor,
+        mode_mask: torch.Tensor,
+        batch_size: float,
+        loss_lambda: float,
+    ) -> torch.Tensor:
+        selector = mode_mask.to(
+            device=per_sample_loss.device,
+            dtype=per_sample_loss.dtype,
+        )
+        selected_loss = (per_sample_loss * selector).sum() / batch_size
+        return float(loss_lambda) * selected_loss
+
+    def _prepare_semantic_targets(
+        self,
+        video_pre: Dict[str, Any],
+        semantic_features: torch.Tensor,
+        image_is_pad: Optional[torch.Tensor],
+    ):
+        if semantic_features.ndim != 4:
+            raise ValueError('`semantic_features` must be [B,T,N,D], got '
+                             f'shape {tuple(semantic_features.shape)}.')
+        num_frames = int(semantic_features.shape[1])
+        temporal_factor = int(self.temporal_downsample_factor)
+        if num_frames <= 1 or (num_frames - 1) % temporal_factor != 0:
+            raise ValueError(
+                'Cannot select semantic targets from RGB frame features: '
+                f'num_frames={num_frames}, '
+                f'temporal_downsample_factor={temporal_factor}.')
+        frame_indices = torch.arange(
+            0,
+            num_frames,
+            temporal_factor,
+            device=semantic_features.device,
+            dtype=torch.long,
+        )
+        semantic_features = semantic_features.index_select(1, frame_indices)
+        grid_size = tuple(map(int, video_pre['meta']['grid_size']))
+        token_steps = grid_size[0]
+        if token_steps != frame_indices.numel():
+            raise ValueError(
+                'Semantic/video token step mismatch after frame selection: '
+                f'video token steps={token_steps}, '
+                f'semantic target steps={frame_indices.numel()}, '
+                f'frame_indices={frame_indices.tolist()}.')
+        if image_is_pad is None:
+            return semantic_features, None
+        semantic_is_pad = image_is_pad.index_select(1, frame_indices)
+        return semantic_features, semantic_is_pad
+
+    def _prepare_semantic_targets_for_modes(
+        self,
+        video_pre: Dict[str, Any],
+        semantic_features: Optional[torch.Tensor],
+        image_is_pad: Optional[torch.Tensor],
+        is_forward: torch.Tensor,
+        is_joint: torch.Tensor,
+    ):
+        has_semantic_mode = bool((is_forward | is_joint).any().item())
+        has_semantic_module = (
+            self.semantic_head is not None
+            or self.semantic_adapter is not None)
+        if not has_semantic_module or not has_semantic_mode:
+            return None, None
+        if semantic_features is None:
+            raise ValueError(
+                '`semantic_features` is required when `semantic_head` or '
+                '`semantic_adapter` is configured for forward/joint WAM modes.'
+            )
+        return self._prepare_semantic_targets(
+            video_pre,
+            semantic_features,
+            image_is_pad,
+        )
+
+    @staticmethod
+    def _append_semantic_queries_to_video_pre(
+        video_pre: Dict[str, Any],
+        semantic_pre: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        video_seq_len = int(video_pre['tokens'].shape[1])
+        semantic_seq_len = int(semantic_pre['tokens'].shape[1])
+        if video_pre['t_mod'].ndim != 4:
+            raise ValueError(
+                '`video_pre.t_mod` must be per-token [B,S,6,D] when '
+                f'appending semantic queries, got '
+                f'shape {tuple(video_pre["t_mod"].shape)}.')
+        if video_pre['context_mask'].ndim != 3:
+            raise ValueError(
+                '`video_pre.context_mask` must be [B,S,L] when appending '
+                f'semantic queries, got '
+                f'shape {tuple(video_pre["context_mask"].shape)}.')
+        source_indices = semantic_pre.get('source_video_indices')
+        if source_indices is None:
+            if semantic_seq_len != video_seq_len:
+                raise ValueError(
+                    '`semantic_pre.source_video_indices` is required when '
+                    'semantic query tokens are not one-to-one with video '
+                    f'tokens, got semantic={semantic_seq_len}, '
+                    f'video={video_seq_len}.')
+            source_indices = torch.arange(
+                video_seq_len,
+                device=video_pre['tokens'].device,
+                dtype=torch.long,
+            )
+        source_indices = source_indices.to(
+            device=video_pre['tokens'].device, dtype=torch.long)
+        if int(source_indices.numel()) != semantic_seq_len:
+            raise ValueError(
+                '`semantic_pre.source_video_indices` length must match '
+                f'semantic tokens, got {source_indices.numel()} and '
+                f'{semantic_seq_len}.')
+        if torch.any(source_indices < 0) or torch.any(
+                source_indices >= video_seq_len):
+            raise ValueError(
+                '`semantic_pre.source_video_indices` contains out-of-range '
+                f'indices for video_seq_len={video_seq_len}.')
+
+        out = dict(video_pre)
+        out['tokens'] = torch.cat(
+            [video_pre['tokens'], semantic_pre['tokens']], dim=1)
+        semantic_freqs = video_pre['freqs'].index_select(0, source_indices)
+        out['freqs'] = torch.cat([video_pre['freqs'], semantic_freqs], dim=0)
+        semantic_t_mod = video_pre['t_mod'].index_select(1, source_indices)
+        out['t_mod'] = torch.cat([video_pre['t_mod'], semantic_t_mod], dim=1)
+        semantic_context_mask = video_pre['context_mask'].index_select(
+            1, source_indices)
+        out['context_mask'] = torch.cat(
+            [video_pre['context_mask'], semantic_context_mask], dim=1)
+        return out
+
+    @staticmethod
+    def _extend_attention_mask_with_semantic_queries(
+        base_mask: torch.Tensor,
+        video_seq_len: int,
+        semantic_seq_len: int,
+        action_seq_len: int,
+        semantic_source_indices: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if base_mask.ndim not in (2, 4):
+            raise ValueError('`base_mask` must be 2D or 4D, got shape '
+                             f'{tuple(base_mask.shape)}.')
+        if semantic_source_indices is None:
+            if semantic_seq_len != video_seq_len:
+                raise ValueError(
+                    '`semantic_source_indices` is required when semantic '
+                    'query tokens are not one-to-one with video tokens, got '
+                    f'semantic={semantic_seq_len}, video={video_seq_len}.')
+            semantic_source_indices = torch.arange(
+                video_seq_len,
+                device=base_mask.device,
+                dtype=torch.long,
+            )
+        semantic_source_indices = semantic_source_indices.to(
+            device=base_mask.device, dtype=torch.long)
+        if int(semantic_source_indices.numel()) != semantic_seq_len:
+            raise ValueError(
+                '`semantic_source_indices` length must match semantic tokens, '
+                f'got {semantic_source_indices.numel()} and '
+                f'{semantic_seq_len}.')
+        if torch.any(semantic_source_indices < 0) or torch.any(
+                semantic_source_indices >= video_seq_len):
+            raise ValueError(
+                '`semantic_source_indices` contains out-of-range indices for '
+                f'video_seq_len={video_seq_len}.')
+
+        total_seq_len = video_seq_len + semantic_seq_len + action_seq_len
+        if base_mask.ndim == 4:
+            out = base_mask.new_zeros((base_mask.shape[0], base_mask.shape[1],
+                                       total_seq_len, total_seq_len))
+            out_prefix = (slice(None), slice(None))
+        else:
+            out = base_mask.new_zeros((total_seq_len, total_seq_len))
+            out_prefix = ()
+
+        video_rows = slice(0, video_seq_len)
+        semantic_rows = slice(video_seq_len, video_seq_len + semantic_seq_len)
+        action_rows = slice(video_seq_len + semantic_seq_len, total_seq_len)
+        base_video = slice(0, video_seq_len)
+        base_action = slice(video_seq_len, video_seq_len + action_seq_len)
+
+        def copy_block(dst_rows, dst_cols, src_rows, src_cols):
+            out[out_prefix +
+                (dst_rows, dst_cols)] = base_mask[out_prefix +
+                                                  (src_rows, src_cols)]
+
+        copy_block(video_rows, video_rows, base_video, base_video)
+        copy_block(video_rows, action_rows, base_video, base_action)
+        copy_block(action_rows, video_rows, base_action, base_video)
+        copy_block(action_rows, action_rows, base_action, base_action)
+        source_rows = base_mask[..., base_video, :].index_select(
+            -2, semantic_source_indices)
+        out[out_prefix +
+            (semantic_rows, video_rows)] = source_rows[..., :video_seq_len]
+        out[out_prefix +
+            (semantic_rows, action_rows)] = source_rows[..., video_seq_len:]
+        source_video_mask = base_mask[..., base_video,
+                                      base_video].index_select(
+                                          -2, semantic_source_indices)
+        semantic_mask = source_video_mask.index_select(
+            -1, semantic_source_indices)
+        out[out_prefix + (semantic_rows, semantic_rows)] = semantic_mask
+        return out
+
+    def _build_video_mot_pre(
+        self,
+        video_pre: Dict[str, Any],
+        semantic_pre: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if semantic_pre is None:
+            return video_pre
+        return self._append_semantic_queries_to_video_pre(
+            video_pre, semantic_pre)
+
+    def _build_training_attention_mask_for_mot(
+        self,
+        mode_ids: torch.Tensor,
+        video_pre: Dict[str, Any],
+        action_pre: Dict[str, Any],
+        semantic_pre: Optional[Dict[str, Any]],
+    ) -> torch.Tensor:
+        video_seq_len = int(video_pre['tokens'].shape[1])
+        action_seq_len = int(action_pre['tokens'].shape[1])
+        base_attention_mask = self._build_training_attention_mask(
+            mode_ids=mode_ids,
+            video_seq_len=video_seq_len,
+            action_seq_len=action_seq_len,
+            video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
+            device=video_pre['tokens'].device,
+        )
+        if semantic_pre is None:
+            return base_attention_mask
+        return self._extend_attention_mask_with_semantic_queries(
+            base_attention_mask,
+            video_seq_len=video_seq_len,
+            semantic_seq_len=int(semantic_pre['tokens'].shape[1]),
+            action_seq_len=action_seq_len,
+            semantic_source_indices=semantic_pre.get('source_video_indices'),
+        )
+
+    def _run_mot(
+        self,
+        video_pre: Dict[str, Any],
+        action_pre: Dict[str, Any],
+        attention_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        return self.mot(
+            embeds_all={
+                'video': video_pre['tokens'],
+                'action': action_pre['tokens'],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                'video': video_pre['freqs'],
+                'action': action_pre['freqs'],
+            },
+            context_all={
+                'video': {
+                    'context': video_pre['context'],
+                    'mask': video_pre['context_mask'],
+                },
+                'action': {
+                    'context': action_pre['context'],
+                    'mask': action_pre['context_mask'],
+                },
+            },
+            t_mod_all={
+                'video': video_pre['t_mod'],
+                'action': action_pre['t_mod'],
+            },
+        )
+
+    @staticmethod
+    def _split_video_semantic_tokens(
+        video_tokens: torch.Tensor,
+        video_pre: Dict[str, Any],
+        semantic_pre: Optional[Dict[str, Any]],
+    ):
+        if semantic_pre is None:
+            return video_tokens, None
+        video_seq_len = int(video_pre['tokens'].shape[1])
+        return video_tokens[:, :video_seq_len], video_tokens[:, video_seq_len:]
+
+    def _compute_semantic_loss_per_sample(
+        self,
+        pred_features: torch.Tensor,
+        target_features: torch.Tensor,
+        semantic_is_pad: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if pred_features.shape != target_features.shape:
+            raise ValueError('Semantic feature shape mismatch: '
+                             f'pred={tuple(pred_features.shape)}, '
+                             f'target={tuple(target_features.shape)}.')
+
+        pred_norm = F.normalize(pred_features.float(), dim=-1)
+        target_norm = F.normalize(target_features.float(), dim=-1)
+        feature_loss_token = 1.0 - (pred_norm * target_norm).sum(dim=-1)
+
+        if semantic_is_pad is None:
+            return feature_loss_token.mean(dim=(1, 2))
+
+        if semantic_is_pad.shape != feature_loss_token.shape[:2]:
+            raise ValueError('Semantic mask shape mismatch: '
+                             f'mask={tuple(semantic_is_pad.shape)}, '
+                             f'loss={tuple(feature_loss_token.shape)}.')
+        feature_loss_step = feature_loss_token.mean(dim=2)
+        valid = (~semantic_is_pad).type_as(feature_loss_step)
+        valid_sum = valid.sum(dim=1).clamp(min=1.0)
+        return (feature_loss_step * valid).sum(dim=1) / valid_sum
+
+    def _compute_dummy_semantic_loss_per_sample(
+        self,
+        batch_size: int,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        loss = reference.new_zeros(())
+        for module in (self.semantic_head, self.semantic_adapter):
+            if module is None:
+                continue
+            for param in module.parameters():
+                if param.requires_grad:
+                    loss = loss + param.sum() * 0.0
+        return loss.expand(batch_size)
+
     def _sample_training_mode_ids(
         self,
         batch_size: int,
@@ -961,6 +1356,7 @@ class WAMHead(nn.Module):
         image_is_pad: Optional[torch.Tensor] = None,
         proprio: Optional[torch.Tensor] = None,
         training_mode: Optional[torch.Tensor] = None,
+        semantic_features: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         prep = self._prepare_training_inputs(
@@ -1081,41 +1477,52 @@ class WAMHead(nn.Module):
             context_mask=inputs['context_mask'],
         )
 
-        attention_mask = self._build_training_attention_mask(
+        semantic_targets, semantic_target_is_pad = \
+            self._prepare_semantic_targets_for_modes(
+                video_pre=video_pre,
+                semantic_features=semantic_features,
+                image_is_pad=inputs['image_is_pad'],
+                is_forward=is_forward,
+                is_joint=is_joint,
+            )
+        semantic_pre = None
+        if self.semantic_adapter is not None and semantic_targets is not None:
+            semantic_pre = self.semantic_adapter.pre_dit(video_pre=video_pre, )
+        video_mot_pre = self._build_video_mot_pre(
+            video_pre=video_pre,
+            semantic_pre=semantic_pre,
+        )
+        attention_mask = self._build_training_attention_mask_for_mot(
             mode_ids=mode_ids,
-            video_seq_len=video_pre['tokens'].shape[1],
-            action_seq_len=action_pre['tokens'].shape[1],
-            video_tokens_per_frame=int(video_pre['meta']['tokens_per_frame']),
-            device=video_pre['tokens'].device,
+            video_pre=video_pre,
+            action_pre=action_pre,
+            semantic_pre=semantic_pre,
         )
-        tokens_out = self.mot(
-            embeds_all={
-                'video': video_pre['tokens'],
-                'action': action_pre['tokens'],
-            },
+        tokens_out = self._run_mot(
+            video_pre=video_mot_pre,
+            action_pre=action_pre,
             attention_mask=attention_mask,
-            freqs_all={
-                'video': video_pre['freqs'],
-                'action': action_pre['freqs'],
-            },
-            context_all={
-                'video': {
-                    'context': video_pre['context'],
-                    'mask': video_pre['context_mask'],
-                },
-                'action': {
-                    'context': action_pre['context'],
-                    'mask': action_pre['context_mask'],
-                },
-            },
-            t_mod_all={
-                'video': video_pre['t_mod'],
-                'action': action_pre['t_mod'],
-            },
         )
-        pred_video = self.video_expert.post_dit(tokens_out['video'], video_pre)
+        video_tokens_out, semantic_tokens_out = \
+            self._split_video_semantic_tokens(
+                tokens_out['video'],
+                video_pre=video_pre,
+                semantic_pre=semantic_pre,
+            )
+        pred_video = self.video_expert.post_dit(video_tokens_out, video_pre)
         pred_action = self.action_expert.post_dit(tokens_out['action'],
                                                   action_pre)
+        pred_semantic = None
+        if semantic_pre is not None:
+            pred_semantic = self.semantic_adapter.post_dit(
+                semantic_tokens_out,
+                semantic_pre,
+            )
+        elif semantic_targets is not None:
+            pred_semantic = self.semantic_head(
+                video_tokens_out,
+                video_pre,
+            )
 
         include_initial_video_step = inputs['first_frame_latents'] is None
         if inputs['first_frame_latents'] is not None:
@@ -1147,34 +1554,50 @@ class WAMHead(nn.Module):
             )
         weighted_action_loss = action_loss_per_sample * action_weight
 
-        video_dtype = weighted_video_loss.dtype
-        action_dtype = weighted_action_loss.dtype
-        forward_selector = is_forward.to(device=device, dtype=video_dtype)
-        idm_selector = is_idm.to(device=device, dtype=action_dtype)
-        policy_selector = is_policy.to(device=device, dtype=action_dtype)
-        joint_video_selector = is_joint.to(device=device, dtype=video_dtype)
-        joint_action_selector = is_joint.to(device=device, dtype=action_dtype)
+        loss_forward_video = self._mode_loss(weighted_video_loss, is_forward,
+                                             batch_size,
+                                             self.loss_lambda_forward_video)
+        loss_idm_action = self._mode_loss(weighted_action_loss, is_idm,
+                                          batch_size,
+                                          self.loss_lambda_idm_action)
+        loss_policy_action = self._mode_loss(weighted_action_loss, is_policy,
+                                             batch_size,
+                                             self.loss_lambda_policy_action)
+        loss_joint_video = self._mode_loss(weighted_video_loss, is_joint,
+                                           batch_size,
+                                           self.loss_lambda_joint_video)
+        loss_joint_action = self._mode_loss(weighted_action_loss, is_joint,
+                                            batch_size,
+                                            self.loss_lambda_joint_action)
+        loss_forward_semantic = weighted_video_loss.new_zeros(())
+        loss_joint_semantic = weighted_video_loss.new_zeros(())
+        if self.semantic_head is not None or self.semantic_adapter is not None:
+            if semantic_targets is not None:
+                semantic_loss_per_sample = \
+                    self._compute_semantic_loss_per_sample(
+                        pred_features=pred_semantic,
+                        target_features=semantic_targets,
+                        semantic_is_pad=semantic_target_is_pad,
+                    )
+            else:
+                semantic_loss_per_sample = \
+                    self._compute_dummy_semantic_loss_per_sample(
+                        batch_size=batch_size_int,
+                        reference=weighted_video_loss,
+                    )
+            loss_forward_semantic = self._mode_loss(
+                semantic_loss_per_sample, is_forward, batch_size,
+                self.loss_lambda_forward_semantic)
+            loss_joint_semantic = self._mode_loss(
+                semantic_loss_per_sample, is_joint, batch_size,
+                self.loss_lambda_joint_semantic)
 
-        loss_forward_video = (
-            self.loss_lambda_forward_video *
-            (weighted_video_loss * forward_selector).sum() / batch_size)
-        loss_idm_action = (
-            self.loss_lambda_idm_action *
-            (weighted_action_loss * idm_selector).sum() / batch_size)
-        loss_policy_action = (
-            self.loss_lambda_policy_action *
-            (weighted_action_loss * policy_selector).sum() / batch_size)
-        loss_joint_video = (
-            self.loss_lambda_joint_video *
-            (weighted_video_loss * joint_video_selector).sum() / batch_size)
-        loss_joint_action = (
-            self.loss_lambda_joint_action *
-            (weighted_action_loss * joint_action_selector).sum() / batch_size)
         loss_total = (
             loss_forward_video + loss_idm_action + loss_policy_action +
-            loss_joint_video + loss_joint_action)
+            loss_joint_video + loss_joint_action + loss_forward_semantic +
+            loss_joint_semantic)
 
-        return {
+        ret = {
             'loss': loss_total,
             'loss_forward_video': loss_forward_video.detach(),
             'loss_idm_action': loss_idm_action.detach(),
@@ -1182,3 +1605,7 @@ class WAMHead(nn.Module):
             'loss_joint_video': loss_joint_video.detach(),
             'loss_joint_action': loss_joint_action.detach(),
         }
+        if self.semantic_head is not None or self.semantic_adapter is not None:
+            ret['loss_forward_semantic'] = loss_forward_semantic.detach()
+            ret['loss_joint_semantic'] = loss_joint_semantic.detach()
+        return ret

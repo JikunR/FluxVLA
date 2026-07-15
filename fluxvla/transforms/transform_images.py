@@ -840,6 +840,88 @@ class SimpleNormalizeImages:
 
 
 @TRANSFORMS.register_module()
+class PrepareSemanticImages:
+    """Build DINO-ready video frames from prepared WAM video tensors.
+
+    The input is expected after ``PrepareVideo`` as ``[3,T,H,W]`` or
+    ``[B,3,T,H,W]``. The output keeps the same temporal layout and writes
+    ``semantic_images`` for WAM semantic targets.
+    """
+
+    def __init__(self,
+                 img_key: str = 'images',
+                 output_key: str = 'semantic_images',
+                 height: int = 224,
+                 width: int = 224,
+                 input_range: str = 'minus_one_to_one',
+                 means: Optional[List[float]] = None,
+                 stds: Optional[List[float]] = None,
+                 *args,
+                 **kwargs):
+        if input_range not in ('minus_one_to_one', 'zero_to_one',
+                               'zero_to_255'):
+            raise ValueError(
+                "`input_range` must be 'minus_one_to_one', 'zero_to_one', "
+                f"or 'zero_to_255', got {input_range!r}.")
+        self.img_key = img_key
+        self.output_key = output_key
+        self.height = int(height)
+        self.width = int(width)
+        self.input_range = input_range
+        self.means = torch.tensor(
+            means or [123.515625, 116.044921875, 103.59375],
+            dtype=torch.float32,
+        ).view(1, 3, 1, 1)
+        self.stds = torch.tensor(
+            stds or [58.271484375, 57.0263671875, 57.275390625],
+            dtype=torch.float32,
+        ).view(1, 3, 1, 1)
+
+    def __call__(self, data: dict):
+        if self.img_key not in data:
+            raise KeyError(f'Input data must contain {self.img_key!r}.')
+
+        src = data[self.img_key]
+        is_tensor = isinstance(src, torch.Tensor)
+        images = src.float() if is_tensor else torch.as_tensor(
+            src, dtype=torch.float32)
+        has_batch = images.ndim == 5
+        if images.ndim == 4:
+            images = images.unsqueeze(0)
+        if images.ndim != 5 or images.shape[1] != 3:
+            raise ValueError(
+                f'`{self.img_key}` must be [3,T,H,W] or [B,3,T,H,W], '
+                f'got shape {tuple(images.shape)}.')
+
+        bsz, channels, frames, height, width = images.shape
+        images = images.permute(0, 2, 1, 3, 4).reshape(bsz * frames, channels,
+                                                       height, width)
+
+        if self.input_range == 'minus_one_to_one':
+            images = (images + 1.0) * 127.5
+        elif self.input_range == 'zero_to_one':
+            images = images * 255.0
+        images = images.clamp(0.0, 255.0)
+
+        images = torch.nn.functional.interpolate(
+            images,
+            size=(self.height, self.width),
+            mode='bilinear',
+            align_corners=False,
+            antialias=True,
+        )
+        means = self.means.to(device=images.device, dtype=images.dtype)
+        stds = self.stds.to(device=images.device, dtype=images.dtype)
+        images = (images - means) / (stds + 1e-8)
+        images = images.reshape(bsz, frames, channels, self.height,
+                                self.width).permute(0, 2, 1, 3, 4)
+        if not has_batch:
+            images = images[0]
+        data[self.output_key] = images if is_tensor else images.numpy()
+        return data
+
+
+@TRANSFORMS.register_module()
 class TransformImage:
     """Image processor for Prismatic models.
     This class applies a series of transformations to images,

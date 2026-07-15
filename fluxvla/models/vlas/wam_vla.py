@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Any, Callable, Dict, Optional
 
 import torch
 from PIL import Image
 
-from fluxvla.engines import VLAS, initialize_overwatch
+from fluxvla.engines import (VLAS, build_vision_backbone_from_cfg,
+                             initialize_overwatch)
 from fluxvla.engines.utils.name_map import str_to_dtype
 from ..backbones.vlms.wan22_loader import build_wan_video_vae38
 from ..heads.wam_head import WAMHead
@@ -66,6 +68,7 @@ class WAMVLA(BaseVLA):
         self,
         vlm_backbone: Optional[Dict] = None,
         video_latent_codec: Optional[Dict] = None,
+        semantic_feature_extractor: Optional[Dict] = None,
         vla_head: Optional[Dict] = None,
         proprio_dim: Optional[int] = None,
         action_horizon: Optional[int] = None,
@@ -111,6 +114,10 @@ class WAMVLA(BaseVLA):
             torch_dtype=self.torch_dtype,
             skip_load=skip_load,
         )
+        semantic_feature_extractor_module = (
+            build_vision_backbone_from_cfg(
+                copy.deepcopy(semantic_feature_extractor))
+            if semantic_feature_extractor is not None else None)
         head_cfg = dict(vla_head)
         head_cfg.setdefault('proprio_dim', proprio_dim_value)
         head_cfg.setdefault(
@@ -136,6 +143,9 @@ class WAMVLA(BaseVLA):
         self.frame_window_size = frame_window_size_value
         self.video_latent_codec = video_latent_codec_module
         self.video_latent_codec.requires_grad_(False)
+        self.semantic_feature_extractor = semantic_feature_extractor_module
+        if self.semantic_feature_extractor is not None:
+            self.semantic_feature_extractor.requires_grad_(False)
 
         self.all_module_keys = ['video_latent_codec', 'vla_head']
         if self.vlm_backbone is not None:
@@ -270,6 +280,33 @@ class WAMVLA(BaseVLA):
         )
 
     @torch.no_grad()
+    def _build_semantic_features(
+        self,
+        semantic_images: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.semantic_feature_extractor is None:
+            raise ValueError(
+                '`semantic_feature_extractor` is required to build semantic '
+                'features.')
+        self.semantic_feature_extractor.eval()
+        if semantic_images.ndim != 5 or semantic_images.shape[1] != 3:
+            raise ValueError(
+                '`semantic_images` must be [B,3,T,H,W] before extracting '
+                f'semantic features, got shape {tuple(semantic_images.shape)}.'
+            )
+        batch_size, _, num_frames, height, width = semantic_images.shape
+        frames = semantic_images.permute(0, 2, 1, 3,
+                                         4).reshape(batch_size * num_frames, 3,
+                                                    height, width)
+        features = self.semantic_feature_extractor(frames)
+        return features.reshape(
+            batch_size,
+            num_frames,
+            features.shape[-2],
+            features.shape[-1],
+        )
+
+    @torch.no_grad()
     def _encode_input_image_latents(
             self,
             input_image: torch.Tensor,
@@ -383,6 +420,7 @@ class WAMVLA(BaseVLA):
         states: Optional[torch.Tensor] = None,
         actions: Optional[torch.Tensor] = None,
         action_masks: Optional[torch.Tensor] = None,
+        semantic_images: Optional[torch.Tensor] = None,
         state_chunks: Optional[torch.Tensor] = None,
         state_chunk_masks: Optional[torch.Tensor] = None,
         frame_masks: Optional[torch.Tensor] = None,
@@ -440,6 +478,14 @@ class WAMVLA(BaseVLA):
         image_is_pad = None
         if frame_masks is not None:
             image_is_pad = ~frame_masks.to(dtype=torch.bool)
+        semantic_features = None
+        if self.semantic_feature_extractor is not None:
+            if semantic_images is None:
+                raise ValueError('`semantic_images` is required when '
+                                 '`semantic_feature_extractor` is configured.')
+            semantic_images = semantic_images.to(
+                device=self.device, dtype=self.torch_dtype, non_blocking=True)
+            semantic_features = self._build_semantic_features(semantic_images)
 
         return self.vla_head(
             input_latents=input_latents,
@@ -452,6 +498,7 @@ class WAMVLA(BaseVLA):
             training_mode=training_mode,
             state_chunks=state_chunks,
             state_chunk_is_pad=state_chunk_is_pad,
+            semantic_features=semantic_features,
             embodiment_ids=embodiment_ids,
         )
 
@@ -718,21 +765,32 @@ class WAMVLA(BaseVLA):
             return policies[0]
         return partial(_or_policy, policies=policies)
 
-    def load_state_dict(self, state_dict, strict: bool = True, assign=False):
-        if not strict:
-            return super().load_state_dict(
-                state_dict, strict=False, assign=assign)
+    def _filter_optional_unexpected_keys(self, unexpected_keys):
+        ignored_prefixes = []
+        if self.vlm_backbone is None:
+            ignored_prefixes.append('vlm_backbone.')
+        if self.semantic_feature_extractor is None:
+            ignored_prefixes.append('semantic_feature_extractor.')
+        return [
+            key for key in unexpected_keys
+            if not any(key.startswith(prefix) for prefix in ignored_prefixes)
+        ]
 
+    def load_state_dict(self, state_dict, strict: bool = True, assign=False):
         incompatible = super().load_state_dict(
             state_dict, strict=False, assign=assign)
+        unexpected_keys = incompatible.unexpected_keys
+        filtered_unexpected_keys = self._filter_optional_unexpected_keys(
+            unexpected_keys)
+        incompatible.unexpected_keys[:] = filtered_unexpected_keys
+        if not strict:
+            return incompatible
+
         missing_keys = [
             key for key in incompatible.missing_keys
             if not key.startswith('vlm_backbone.')
         ]
-        unexpected_keys = [
-            key for key in incompatible.unexpected_keys if not (
-                self.vlm_backbone is None and key.startswith('vlm_backbone.'))
-        ]
+        unexpected_keys = list(incompatible.unexpected_keys)
         if missing_keys or unexpected_keys:
             messages = []
             if missing_keys:
