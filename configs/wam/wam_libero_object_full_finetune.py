@@ -116,7 +116,7 @@ model = dict(
     ),
 )
 
-inference_model = dict(model, vlm_backbone=_wan_text_backbone)
+inference_model = dict(model, vlm_backbone=None)
 
 train_dataloader = dict(
     per_device_batch_size=8,
@@ -273,13 +273,10 @@ eval = dict(
                 state_dim=8,
             ),
             dict(
-                type='LiberoPromptFromInputs',
-                tokenizer=dict(
-                    type='PretrainedTokenizer',
-                    model_path=_wan_tokenizer_path,
-                ),
-                max_len=128,
-                use_conversation=False,
+                type='LoadCachedTextEmbedding',
+                cache_dir=_text_cache_dir,
+                context_len=128,
+                enc_id='wan22ti2v5b',
                 prompt_template=_wan_prompt_template,
             ),
             dict(

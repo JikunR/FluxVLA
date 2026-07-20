@@ -521,11 +521,20 @@ class LiberoParquetEvalDataset:
             data = t(data)
         replay_img = data.get('replay_img', None)
 
-        assert 'lang_tokens' in data and 'lang_masks' in data, \
-            'Prompt transform must provide lang_tokens and lang_masks'
-        tokens = torch.tensor(data['lang_tokens'])
-        token_mask = data['lang_masks'].tolist() if hasattr(
-            data['lang_masks'], 'tolist') else list(data['lang_masks'])
+        has_lang_tokens = 'lang_tokens' in data or 'lang_masks' in data
+        has_context = 'context' in data or 'context_mask' in data
+        if has_lang_tokens and ('lang_tokens' not in data
+                                or 'lang_masks' not in data):
+            raise KeyError(
+                '`lang_tokens` and `lang_masks` must be provided together.')
+        missing_context = 'context' not in data or 'context_mask' not in data
+        if has_context and missing_context:
+            raise KeyError(
+                '`context` and `context_mask` must be provided together.')
+        if not has_lang_tokens and not has_context:
+            raise AssertionError(
+                'Prompt transform must provide either '
+                '`lang_tokens/lang_masks` or `context/context_mask`.')
 
         # Proprio
         img_masks = data.get('img_masks', None)
@@ -549,9 +558,18 @@ class LiberoParquetEvalDataset:
         batch: Dict[str, Any] = dict(
             images=pixel_values.cuda().unsqueeze(0),
             img_masks=torch.tensor([img_masks]).cuda(),
-            lang_tokens=tokens.unsqueeze(0).cuda(),
-            lang_masks=torch.tensor(token_mask).unsqueeze(0).cuda(),
         )
+        if has_context:
+            batch['context'] = torch.as_tensor(
+                data['context']).unsqueeze(0).cuda()
+            batch['context_mask'] = torch.as_tensor(
+                data['context_mask']).unsqueeze(0).cuda()
+        if has_lang_tokens:
+            tokens = torch.tensor(data['lang_tokens'])
+            token_mask = data['lang_masks'].tolist() if hasattr(
+                data['lang_masks'], 'tolist') else list(data['lang_masks'])
+            batch['lang_tokens'] = tokens.unsqueeze(0).cuda()
+            batch['lang_masks'] = torch.tensor(token_mask).unsqueeze(0).cuda()
 
         if 'states' in data:
             batch['states'] = torch.from_numpy(
