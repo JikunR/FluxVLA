@@ -61,6 +61,17 @@ STATE_JOINT_NAMES = [
 DEFAULT_KP = 140.0
 DEFAULT_KD = 4.0
 
+def _rpy_to_rotmat(rpy):
+    roll, pitch, yaw = rpy
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ])
+
 
 class NumpySafeEncoder(json.JSONEncoder):
     """JSON encoder that tolerates numpy scalars and arrays."""
@@ -107,6 +118,20 @@ def _rotmat_to_quat_xyzw(mat):
         qz = 0.25 * s
     q = np.array([qx, qy, qz, qw], dtype=np.float64)
     return q / max(np.linalg.norm(q), 1e-8)
+
+
+def _quat_xyzw_to_rotmat(quaternion):
+    x, y, z, w = np.asarray(quaternion, dtype=np.float64)
+    norm = max(np.linalg.norm([x, y, z, w]), 1e-8)
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),
+         2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+         2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w),
+         1 - 2 * (x * x + y * y)],
+    ])
 
 
 def _is_degenerate_rot6d(rot6d):
@@ -164,6 +189,7 @@ class OliOperator:
 
     def __init__(self,
                  head_rgb_topic='/head/color/image_raw/compressed',
+                 left_wrist_rgb_topic=None,
                  joint_state_topic='/joint/state',
                  robot_ip='10.192.1.2',
                  ws_port=5000,
@@ -178,6 +204,7 @@ class OliOperator:
             ws_accid (str): WebSocket account id; None means auto-detect.
         """
         self.head_rgb_topic = head_rgb_topic
+        self.left_wrist_rgb_topic = left_wrist_rgb_topic
         self.joint_state_topic = joint_state_topic
 
         self.robot_ip = robot_ip
@@ -201,6 +228,7 @@ class OliOperator:
         from sensor_msgs.msg import CompressedImage, JointState
 
         self.head_img_deque = deque(maxlen=5)
+        self.left_wrist_img_deque = deque(maxlen=5)
         self.joint_state_deque = deque(maxlen=5)
 
         if rospy.get_name() == '/unnamed':
@@ -212,6 +240,13 @@ class OliOperator:
             self._head_img_callback,
             queue_size=1000,
             tcp_nodelay=True)
+        if self.left_wrist_rgb_topic is not None:
+            rospy.Subscriber(
+                self.left_wrist_rgb_topic,
+                CompressedImage,
+                self._left_wrist_img_callback,
+                queue_size=1000,
+                tcp_nodelay=True)
         rospy.Subscriber(
             self.joint_state_topic,
             JointState,
@@ -222,6 +257,10 @@ class OliOperator:
     def _head_img_callback(self, msg):
         """Buffer the latest head image message."""
         self.head_img_deque.append(msg)
+
+    def _left_wrist_img_callback(self, msg):
+        """Buffer the latest left-wrist image message."""
+        self.left_wrist_img_deque.append(msg)
 
     def _joint_state_callback(self, msg):
         """Buffer the latest joint state message."""
@@ -248,19 +287,36 @@ class OliOperator:
                 state is 31 joints + 2 hand-closed flags; ``False`` if the
                 head image or joint state is not yet available.
         """
-        if (len(self.head_img_deque) == 0 or len(self.joint_state_deque) == 0):
+        if (len(self.head_img_deque) == 0 or len(self.joint_state_deque) == 0
+                or (self.left_wrist_rgb_topic is not None
+                    and len(self.left_wrist_img_deque) == 0)):
             return False
 
         head_bgr = self._decode_compressed(self.head_img_deque[-1])
         if head_bgr is None:
             return False
         head_img = head_bgr[:, :, ::-1].copy()  # BGR -> RGB
+        left_wrist_img = None
+        if self.left_wrist_rgb_topic is not None:
+            left_wrist_bgr = self._decode_compressed(
+                self.left_wrist_img_deque[-1])
+            if left_wrist_bgr is None:
+                return False
+            left_wrist_img = left_wrist_bgr[:, :, ::-1].copy()
 
         joint_msg = self.joint_state_deque[-1]
-        names = list(joint_msg.name) if getattr(joint_msg, 'name', None) \
-            else []
+        names_value = getattr(joint_msg, 'name', None)
+        if names_value is None:
+            names_value = getattr(joint_msg, 'names', None)
+        positions_value = getattr(joint_msg, 'position', None)
+        if positions_value is None:
+            positions_value = getattr(joint_msg, 'q', None)
+        if positions_value is None:
+            print('Joint state has neither position nor q; dropping frame')
+            return False
+        names = list(names_value) if names_value is not None else []
         if names:
-            positions = list(joint_msg.position)
+            positions = list(positions_value)
             if len(names) != len(positions):
                 print('Joint name/position length mismatch; '
                       'dropping frame')
@@ -280,7 +336,7 @@ class OliOperator:
         else:
             # No joint names published; assume canonical STATE_JOINT_NAMES
             # order.
-            joint_state = np.asarray(joint_msg.position, dtype=np.float32)
+            joint_state = np.asarray(positions_value, dtype=np.float32)
             if joint_state.size < 31:
                 print(f'Joint state size {joint_state.size} < 31')
                 return False
@@ -301,6 +357,8 @@ class OliOperator:
             joint_state,
             np.array([left_hand_closed, right_hand_closed], dtype=np.float32)
         ])
+        if left_wrist_img is not None:
+            return (head_img, left_wrist_img, state)
         return (head_img, state)
 
     # ========== WebSocket control output ==========
@@ -510,3 +568,196 @@ class OliOperator:
         if self.ws_client:
             self.ws_client.close()
             self.ws_connected = False
+
+
+@OPERATORS.register_module()
+class MrosOliOperator(OliOperator):
+    """Oli operator using the WBT MROS teleoperation protocol.
+
+    The output contract mirrors ``Teleop02WbtOperator``: joint commands and
+    a ``base_link`` anchor are published as one ``TeleopMsg`` on
+    ``/teleop_cmd_WBT``. This is the protocol consumed by the simulator and
+    avoids the private ``/vla/command`` format.
+    """
+
+    def __init__(self,
+                 finger_state_topic='/brainco1/hand/state',
+                 finger_cmd_topic='/brainco1/hand/cmd_vla',
+                 teleop_wbt_topic='/teleop_cmd_WBT',
+                 **kwargs):
+        self.finger_state_topic = finger_state_topic
+        self.finger_cmd_topic = finger_cmd_topic
+        self.teleop_wbt_topic = teleop_wbt_topic
+        self.last_finger_state = np.zeros(12, dtype=np.float32)
+        self._accum_base_pos = np.array([0.0, 0.0, 0.9], dtype=np.float64)
+        self._accum_base_yaw = 0.0
+        super().__init__(**kwargs)
+
+    def _init_ros(self):
+        """Initialize MROS subscriptions used by the WBT data contract."""
+        import mros
+        from mros.controller_msgs.msg import JointState
+        from mros.sensor_msgs.msg import CompressedImage
+        from mros.std_msgs.msg import Float32Array
+
+        if not mros.ok():
+            mros.init('fluxvla_oli_operator')
+
+        self.color_subscriber = mros.subscribe(
+            self.head_rgb_topic, CompressedImage, None)
+        self.left_wrist_color_subscriber = mros.subscribe(
+            self.left_wrist_rgb_topic, CompressedImage, None)
+        self.joint_state_subscriber = mros.subscribe(
+            self.joint_state_topic, JointState, None)
+        self.finger_state_subscriber = mros.subscribe(
+            self.finger_state_topic, Float32Array, None)
+
+    def _init_websocket(self):
+        """Initialize WBT teleop and hand-command publishers."""
+        import mros
+        from mros.std_msgs.msg import Float32Array
+        from mros.teleop_msgs.msg import TeleopMsg
+
+        self.teleop_wbt_publisher = mros.advertise(
+            self.teleop_wbt_topic, TeleopMsg, None)
+        self.finger_publisher = mros.advertise(
+            self.finger_cmd_topic, Float32Array, queue_size=10)
+
+    def _read_compressed_rgb_image(self, subscriber, timeout):
+        """Read one compressed image and convert it from BGR to RGB."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = subscriber.readMsgRT()
+            if msg is not None:
+                image = self._decode_compressed(msg)
+                if image is not None:
+                    return image[:, :, ::-1].copy()
+                return None
+            time.sleep(0.005)
+        return None
+
+    @staticmethod
+    def _read_message(subscriber, timeout):
+        """Read a message from an MROS subscriber before the deadline."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = subscriber.readMsgRT()
+            if msg is not None:
+                return msg
+            time.sleep(0.005)
+        return None
+
+    def get_frame(self, timeout=0.05):
+        """Return two RGB views and the 33-dim WBT state vector."""
+        head_img = self._read_compressed_rgb_image(
+            self.color_subscriber, timeout)
+        left_wrist_img = self._read_compressed_rgb_image(
+            self.left_wrist_color_subscriber, timeout)
+        joint_state_msg = self._read_message(
+            self.joint_state_subscriber, timeout)
+        if (head_img is None or left_wrist_img is None
+                or joint_state_msg is None):
+            return False
+
+        joint_state = np.asarray(joint_state_msg.q, dtype=np.float32)
+        if joint_state.size < 31:
+            print(f'Joint state size {joint_state.size} < 31')
+            return False
+
+        finger_state_msg = self._read_message(
+            self.finger_state_subscriber, timeout)
+        if finger_state_msg is not None:
+            finger_state = np.asarray(finger_state_msg.data, dtype=np.float32)
+            if finger_state.size >= 12:
+                self.last_finger_state = finger_state[:12].copy()
+
+        left_closed = float(np.mean(self.last_finger_cmd[0:12:2])) > 20.0
+        right_closed = float(np.mean(self.last_finger_cmd[1:12:2])) > 20.0
+        state = np.concatenate([
+            joint_state[:31],
+            np.array([left_closed, right_closed], dtype=np.float32),
+        ])
+        return head_img, left_wrist_img, state
+
+    @staticmethod
+    def _make_keypoint(name, pos, quat_xyzw):
+        """Construct a teleop keypoint from a world-frame pose."""
+        from mros.teleop_msgs.msg import KeyPoint
+
+        keypoint = KeyPoint()
+        keypoint.name = name
+        keypoint.pose.position.x = float(pos[0])
+        keypoint.pose.position.y = float(pos[1])
+        keypoint.pose.position.z = float(pos[2])
+        keypoint.pose.orientation.x = float(quat_xyzw[0])
+        keypoint.pose.orientation.y = float(quat_xyzw[1])
+        keypoint.pose.orientation.z = float(quat_xyzw[2])
+        keypoint.pose.orientation.w = float(quat_xyzw[3])
+        return keypoint
+
+    def send_action(self, action):
+        """Publish a 42-dim action through the standard WBT MROS topics."""
+        from mros.controller_msgs.msg import JointCmd
+        from mros.std_msgs.msg import Float32Array
+        from mros.teleop_msgs.msg import TeleopMsg
+
+        action = np.asarray(action, dtype=np.float64)
+        if action.shape != (42, ):
+            raise ValueError(
+                f'MrosOliOperator expects a (42,) action, got {action.shape}')
+        if not np.all(np.isfinite(action)):
+            raise ValueError('MrosOliOperator received a non-finite action')
+        if _is_degenerate_rot6d(action[34:40]):
+            raise ValueError('MrosOliOperator received degenerate base rot6d')
+
+        base_rotation = _quat_xyzw_to_rotmat(
+            _rot6d_to_quat_xyzw(action[34:40]))
+        yaw_delta = float(np.arctan2(base_rotation[1, 0],
+                                     base_rotation[0, 0]))
+        pitch = float(np.arcsin(-base_rotation[2, 0]))
+        roll = float(np.arctan2(base_rotation[2, 1], base_rotation[2, 2]))
+        cos_yaw = np.cos(self._accum_base_yaw)
+        sin_yaw = np.sin(self._accum_base_yaw)
+        self._accum_base_pos[0] += (
+            cos_yaw * action[31] - sin_yaw * action[32])
+        self._accum_base_pos[1] += (
+            sin_yaw * action[31] + cos_yaw * action[32])
+        self._accum_base_pos[2] = action[33]
+        self._accum_base_yaw = np.arctan2(
+            np.sin(self._accum_base_yaw + yaw_delta),
+            np.cos(self._accum_base_yaw + yaw_delta))
+        base_quat_xyzw = _rotmat_to_quat_xyzw(_rpy_to_rotmat(
+            [roll, pitch, self._accum_base_yaw]))
+
+        teleop_msg = TeleopMsg()
+        teleop_msg.header.frame_id = 'world'
+        teleop_msg.world.orientation.w = 1.0
+        joint_cmd = JointCmd()
+        joint_cmd.names = list(STATE_JOINT_NAMES)
+        joint_cmd.q = action[:31].astype(np.float32).tolist()
+        joint_cmd.v = [0.0] * 31
+        joint_cmd.tau = [0.0] * 31
+        joint_cmd.kp = [DEFAULT_KP] * 31
+        joint_cmd.kd = [DEFAULT_KD] * 31
+        joint_cmd.mode = [0] * 31
+        joint_cmd.na = 31
+        teleop_msg.joint_cmd = joint_cmd
+        teleop_msg.anchors = [self._make_keypoint(
+            'base_link', self._accum_base_pos, base_quat_xyzw)]
+        self.teleop_wbt_publisher.publish(teleop_msg)
+
+        left_val = 100.0 if action[40] >= 0.5 else 0.0
+        right_val = 100.0 if action[41] >= 0.5 else 0.0
+        finger_cmd = np.zeros(14, dtype=np.float32)
+        finger_cmd[0:12:2] = left_val
+        finger_cmd[1:12:2] = right_val
+        finger_cmd[2:4] = 100.0
+        finger_cmd[12:14] = 2.0
+        self.last_finger_cmd = finger_cmd
+        finger_msg = Float32Array()
+        finger_msg.data = finger_cmd.tolist()
+        self.finger_publisher.publish(finger_msg)
+
+    def close(self):
+        """MROS publishers and subscribers are released with the process."""
+        self.ws_connected = False

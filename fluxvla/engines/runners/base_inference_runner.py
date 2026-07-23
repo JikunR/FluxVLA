@@ -505,10 +505,11 @@ class BaseInferenceRunner:
         Returns:
             np.ndarray: Denormalized actions, truncated to action_chunk.
         """
+        action_numpy = raw_action.float().cpu().numpy()
         if self._use_remote:
-            return raw_action.cpu().numpy()[:self.action_chunk]
+            return action_numpy[:self.action_chunk]
         denormalized = self.denormalize_action(
-            dict(action=raw_action.cpu().numpy()))
+            dict(action=action_numpy))
         return denormalized[:self.action_chunk]
 
     def _get_user_task_instruction(self, default_instruction: str) -> str:

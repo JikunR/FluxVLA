@@ -154,11 +154,21 @@ class OliInferenceRunner(BaseInferenceRunner):
             # Shutdown requested while waiting for the first observation.
             raise _ShutdownRequested()
 
-        head_img, state = result
+        if len(result) == 3:
+            head_img, left_wrist_img, state = result
+        else:
+            head_img, state = result
+            left_wrist_img = None
         observation = {
             'qpos': state,
             self.camera_names[0]: head_img,  # 'head'
         }
+        if left_wrist_img is not None:
+            if len(self.camera_names) < 2:
+                raise ValueError(
+                    'A left-wrist image was received but `camera_names` has '
+                    'fewer than two entries.')
+            observation[self.camera_names[1]] = left_wrist_img
         self.observation_window.append(observation)
         return self.observation_window[-1]
 
