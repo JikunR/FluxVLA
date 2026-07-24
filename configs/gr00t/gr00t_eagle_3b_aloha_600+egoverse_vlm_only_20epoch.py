@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GR00T Eagle on the 600-sample real ALOHA fold-cloth data. This config loads
-# the unfine-tuned Eagle VLM checkpoint only; the action head is randomly
-# initialized and trained from scratch.
+# GR00T Eagle co-training on real ALOHA fold-cloth data and Egoverse
+# fold-cloth data. This config loads the unfine-tuned Eagle VLM checkpoint
+# only; the action head is randomly initialized and trained from scratch.
 
 _eagle_base_model_id = ('nvidia/Eagle2-2B')
 _eagle_vlm_ckpt = './checkpoints/Eagle2-2B'
-_data_roots = [
+_egoverse_data_roots = [
+    '/mnt/data/cpfs/users/mayer/egoverse_lerobot/fold_cloth/fold_cloth_rel/fold_cloth_relative',  # noqa: E501
+]
+_aloha_data_roots = [
     '/mnt/data/cpfs/users/mayer/RealRobot_AgileX_aloha_lerobot_v2/20260613_20260613_01_4090_e2e_02',  # noqa: E501
     '/mnt/data/cpfs/users/mayer/RealRobot_AgileX_aloha_lerobot_v2/20260615_20260615_01_4090_e2e_02',  # noqa: E501
 ]
@@ -30,6 +33,69 @@ _vlm_hidden_dim = 1536
 _action_horizon = 32
 _statistic_name = 'private'
 _vlm_only_name_mapping = {'vlm_backbone.vlm.': ''}
+
+
+def _common_transforms(video_keys, embodiment_id: int):
+    return [
+        dict(
+            type='ProcessParquetInputs',
+            embodiment_id=embodiment_id,
+            parquet_keys=[
+                'observation.state',
+                'timestamp',
+                'actions',
+                'info',
+                'stats',
+                'action_masks',
+            ],
+            video_keys=video_keys,
+            name_mappings={'observation.state': ['states']}),
+        dict(type='ParquetPrompter'),
+        dict(
+            type='ProcessPromptsWithImage',
+            max_len=900,
+            num_images=3,
+            tokenizer=dict(
+                type='PretrainedTokenizer',
+                model_path=_eagle_vlm_ckpt,
+            )),
+        dict(type='ResizeImages', height=448, width=448),
+        dict(
+            type='NormalizeImages',
+            means=[
+                [123.515625, 116.04492188, 103.59375],
+                [123.515625, 116.04492188, 103.59375],
+                [123.515625, 116.04492188, 103.59375],
+            ],
+            stds=[
+                [58.27148438, 57.02636719, 57.27539062],
+                [58.27148438, 57.02636719, 57.27539062],
+                [58.27148438, 57.02636719, 57.27539062],
+            ],
+        ),
+        dict(
+            type='NormalizeStatesAndActions',
+            state_dim=_state_dim,
+            action_dim=_head_action_dim,
+            state_key='proprio',
+            action_key='action',
+            norm_type='mean_std')
+    ]
+
+
+def _gr00t_dataset(data_roots, video_keys, embodiment_id: int):
+    return dict(
+        type='ParquetDataset',
+        data_root_path=data_roots,
+        transforms=_common_transforms(
+            video_keys=video_keys,
+            embodiment_id=embodiment_id,
+        ),
+        action_window_size=_action_horizon,
+        action_key='action',
+        window_start_idx=0,
+        statistic_name=_statistic_name)
+
 
 model = dict(
     type='LlavaVLA',
@@ -115,76 +181,41 @@ train_dataloader = dict(
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
+        seed=7,
         name_mappings={
             'observation.state': ['proprio'],
             'action': ['action'],
         },
         statistic_keys=[
             'observation.state',
-            'observation.eepose',
             'timestamp',
             'action',
         ],
         statistic_name=_statistic_name,
-        datasets=[
-            dict(
-                type='ParquetDataset',
-                data_root_path=_data_roots,
-                transforms=[
-                    dict(
-                        type='ProcessParquetInputs',
-                        embodiment_id=0,
-                        parquet_keys=[
-                            'observation.state',
-                            'observation.eepose',
-                            'timestamp',
-                            'actions',
-                            'info',
-                            'stats',
-                            'action_masks',
-                        ],
-                        video_keys=[
-                            'observation.images.cam_high',
-                            'observation.images.cam_left_wrist',
-                            'observation.images.cam_right_wrist',
-                        ],
-                        name_mappings={'observation.state': ['states']}),
-                    dict(type='ParquetPrompter'),
-                    dict(
-                        type='ProcessPromptsWithImage',
-                        max_len=900,
-                        num_images=3,
-                        tokenizer=dict(
-                            type='PretrainedTokenizer',
-                            model_path=_eagle_vlm_ckpt,
-                        )),
-                    dict(type='ResizeImages', height=448, width=448),
-                    dict(
-                        type='NormalizeImages',
-                        means=[
-                            [123.515625, 116.04492188, 103.59375],
-                            [123.515625, 116.04492188, 103.59375],
-                            [123.515625, 116.04492188, 103.59375],
-                        ],
-                        stds=[
-                            [58.27148438, 57.02636719, 57.27539062],
-                            [58.27148438, 57.02636719, 57.27539062],
-                            [58.27148438, 57.02636719, 57.27539062],
-                        ],
-                    ),
-                    dict(
-                        type='NormalizeStatesAndActions',
-                        state_dim=_state_dim,
-                        action_dim=_head_action_dim,
-                        state_key='proprio',
-                        action_key='action',
-                        norm_type='mean_std')
-                ],
-                action_window_size=_action_horizon,
-                action_key='action',
-                window_start_idx=0,
-                statistic_name=_statistic_name)
-        ]))
+        datasets=dict(
+            egoverse=[
+                _gr00t_dataset(
+                    _egoverse_data_roots,
+                    video_keys=[
+                        'observation.images.image',
+                        'observation.images.image',
+                        'observation.images.image',
+                    ],
+                    embodiment_id=5,
+                ),
+            ],
+            aloha=[
+                _gr00t_dataset(
+                    _aloha_data_roots,
+                    video_keys=[
+                        'observation.images.cam_high',
+                        'observation.images.cam_left_wrist',
+                        'observation.images.cam_right_wrist',
+                    ],
+                    embodiment_id=0,
+                ),
+            ],
+        )))
 
 runner = dict(
     type='FSDPTrainRunner',
@@ -200,7 +231,6 @@ runner = dict(
         type='DictCollator',
         keys=[
             'states',
-            'observation.eepose',
             'timestamp',
             'images',
             'img_masks',
