@@ -898,8 +898,15 @@ class WAMHead(nn.Module):
             video_tokens_per_frame=video_tokens_per_frame,
             device=device,
         )
-        masks = torch.stack([forward_mask, idm_mask, policy_mask, joint_mask],
-                            dim=0)
+        vgm_policy_mask = self._build_mot_attention_mask(
+            video_seq_len=video_seq_len,
+            action_seq_len=action_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
+            device=device,
+        )
+        masks = torch.stack(
+            [forward_mask, idm_mask, policy_mask, joint_mask, vgm_policy_mask],
+            dim=0)
         mode_ids = mode_ids.to(device=device, dtype=torch.long)
         has_modes = mode_ids.numel() > 0
         if has_modes and bool((mode_ids == mode_ids[0]).all().item()):
@@ -994,6 +1001,7 @@ class WAMHead(nn.Module):
         is_idm = mode_ids == wam_mode_to_id('idm')
         is_policy = mode_ids == wam_mode_to_id('policy')
         is_joint = mode_ids == wam_mode_to_id('joint')
+        is_vgm_policy = mode_ids == wam_mode_to_id('vgm_policy')
 
         video_noise = torch.randn_like(input_latents)
         sampled_timestep_video = self.train_video_scheduler.sample_training_t(
@@ -1028,12 +1036,12 @@ class WAMHead(nn.Module):
         idm_video = torch.where(idm_video_selector, idm_noisy_video,
                                 input_latents)
 
-        video_selector = (is_forward | is_joint).view(batch_size_int, 1, 1, 1,
-                                                      1)
+        video_selector = (is_forward | is_joint | is_vgm_policy).view(
+            batch_size_int, 1, 1, 1, 1)
         latents_video = torch.where(video_selector, noisy_video, input_latents)
         latents_video = torch.where(
             is_idm.view(batch_size_int, 1, 1, 1, 1), idm_video, latents_video)
-        timestep_video = torch.where(is_forward | is_joint,
+        timestep_video = torch.where(is_forward | is_joint | is_vgm_policy,
                                      sampled_timestep_video,
                                      zero_timestep_video)
         timestep_video = torch.where(is_idm, idm_timestep_video,
@@ -1149,9 +1157,11 @@ class WAMHead(nn.Module):
 
         video_dtype = weighted_video_loss.dtype
         action_dtype = weighted_action_loss.dtype
-        forward_selector = is_forward.to(device=device, dtype=video_dtype)
+        forward_selector = (is_forward | is_vgm_policy).to(
+            device=device, dtype=video_dtype)
         idm_selector = is_idm.to(device=device, dtype=action_dtype)
-        policy_selector = is_policy.to(device=device, dtype=action_dtype)
+        policy_selector = (is_policy | is_vgm_policy).to(
+            device=device, dtype=action_dtype)
         joint_video_selector = is_joint.to(device=device, dtype=video_dtype)
         joint_action_selector = is_joint.to(device=device, dtype=action_dtype)
 

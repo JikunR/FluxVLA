@@ -14,7 +14,7 @@
 
 from typing import Mapping
 
-WAM_TRAINING_MODES = ('forward', 'idm', 'policy', 'joint')
+WAM_TRAINING_MODES = ('forward', 'idm', 'policy', 'joint', 'vgm_policy')
 WAM_MODE_TO_ID = {mode: index for index, mode in enumerate(WAM_TRAINING_MODES)}
 
 
@@ -28,7 +28,10 @@ def wam_mode_to_id(mode: str) -> int:
 def normalize_wam_mode_probs(
         mode_probs: Mapping[str, float] | None) -> dict[str, float]:
     if mode_probs is None:
-        mode_probs = {mode: 1.0 for mode in WAM_TRAINING_MODES}
+        mode_probs = {
+            mode: 1.0
+            for mode in WAM_TRAINING_MODES if mode != 'vgm_policy'
+        }
 
     unknown = set(mode_probs) - set(WAM_TRAINING_MODES)
     if unknown:
