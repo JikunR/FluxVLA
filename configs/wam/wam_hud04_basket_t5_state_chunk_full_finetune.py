@@ -33,7 +33,7 @@ _wan_tokenizer_path = os.path.join(_wan_checkpoint_root, 'google/umt5-xxl')
 _text_cache_dir = os.path.abspath(
     os.environ.get(
         'WAM_TEXT_CACHE_DIR',
-        '/mnt/data/cpfs/users/jikun/vcube_data/wam_text_embeds_cache/hud04_basket',  # noqa: E501
+        os.path.join(_ckpt_root, 'hud04', 'text_embeds_cache'),
     ))
 
 _data_root = '/mnt/data/cpfs/users/jikun/vcube_data'
@@ -346,7 +346,7 @@ inference = dict(
             '/left_wrist_camera/color/image_raw/compressed'),
         joint_state_topic='/joint/state',
         finger_state_topic='/brainco1/hand/state',
-        finger_cmd_topic='/brainco1/hand/cmd_vla',
+        finger_cmd_topic='/brainco1/hand/cmd',
         teleop_wbt_topic='/teleop_cmd_WBT',
     ),
 )

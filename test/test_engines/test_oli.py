@@ -119,7 +119,7 @@ def test_mros_oli_operator_publishes_wbt_teleop_message(monkeypatch):
     operator = MrosOliOperator.__new__(MrosOliOperator)
     operator._accum_base_pos = np.array([0.0, 0.0, 0.9])
     operator._accum_base_yaw = 0.0
-    operator.last_finger_cmd = np.zeros(14, dtype=np.float32)
+    operator.last_finger_cmd = np.zeros(12, dtype=np.float32)
     operator.teleop_wbt_publisher = Publisher()
     operator.finger_publisher = Publisher()
 
@@ -150,7 +150,10 @@ def test_mros_oli_operator_publishes_wbt_teleop_message(monkeypatch):
          second_anchor.pose.position.z],
         [1.0, 1.0, 0.8],
         atol=1e-6)
-    assert operator.finger_publisher.messages[0].data[12:14] == [2.0, 2.0]
+    assert operator.finger_publisher.messages[0].data == [
+        100.0, 0.0, 100.0, 100.0, 100.0, 0.0,
+        100.0, 0.0, 100.0, 0.0, 100.0, 0.0,
+    ]
 
 
 def test_wam_config_uses_standard_mros_teleop_topics():
@@ -162,4 +165,4 @@ def test_wam_config_uses_standard_mros_teleop_topics():
     cfg = Config.fromfile(path)
     assert cfg.inference.operator.type == 'MrosOliOperator'
     assert cfg.inference.operator.teleop_wbt_topic == '/teleop_cmd_WBT'
-    assert cfg.inference.operator.finger_cmd_topic == '/brainco1/hand/cmd_vla'
+    assert cfg.inference.operator.finger_cmd_topic == '/brainco1/hand/cmd'

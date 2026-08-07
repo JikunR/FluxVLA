@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
+import warnings
 from typing import Any, Dict, Tuple, Optional
 from einops import rearrange
 
@@ -10,6 +12,8 @@ try:
     from flash_attn import flash_attn_func as _flash_attn_func
 except Exception:
     _flash_attn_func = None
+
+_flash2_runtime_disabled = False
 
 
 def _can_use_flash2(q: torch.Tensor, k: torch.Tensor,
@@ -33,6 +37,16 @@ def _flash2_unavailable_reason(q: torch.Tensor, k: torch.Tensor,
         reasons.append(f'q/k/v dtypes must match, got '
                        f'{q.dtype}/{k.dtype}/{v.dtype}')
     return '; '.join(reasons) or 'unknown reason'
+
+
+def _is_flash2_compatibility_error(error: RuntimeError) -> bool:
+    message = str(error).lower()
+    return any(fragment in message for fragment in (
+        'invalid device function',
+        'no kernel image is available',
+        'not compiled with flash attention',
+        'flash attention only supports',
+    ))
 
 
 def _mask_description(mask: Optional[torch.Tensor]) -> str:
@@ -120,34 +134,62 @@ def _flash2_attention_with_batched_mask(
     return out
 
 
+def _sdpa_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    mask: Optional[torch.Tensor]) -> torch.Tensor:
+    q_sdpa = q.transpose(1, 2)
+    k_sdpa = k.transpose(1, 2)
+    v_sdpa = v.transpose(1, 2)
+    if mask is not None:
+        if mask.dtype != torch.bool or mask.ndim not in (2, 4):
+            raise ValueError(
+                'WAM SDPA attention mask must be a 2D or 4D bool tensor, '
+                f'got {_mask_description(mask)}.')
+        mask = mask.to(device=q.device)
+    out = F.scaled_dot_product_attention(
+        q_sdpa,
+        k_sdpa,
+        v_sdpa,
+        attn_mask=mask,
+        dropout_p=0.0,
+    )
+    return out.transpose(1, 2)
+
+
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, ctx_mask: Optional[torch.Tensor] = None, compatibility_mode=True):
+    global _flash2_runtime_disabled
     if not compatibility_mode:
         raise NotImplementedError('Only compatibility mode is implemented for flash attention. Please set compatibility_mode=True.')
-
-    if not _can_use_flash2(q, k, v):
-        raise RuntimeError('FlashAttention2 is required for WAM attention; '
-                           f'fallback is disabled: '
-                           f'{_flash2_unavailable_reason(q, k, v)}.')
 
     q_flash = rearrange(q, 'b s (n d) -> b s n d', n=num_heads)
     k_flash = rearrange(k, 'b s (n d) -> b s n d', n=num_heads)
     v_flash = rearrange(v, 'b s (n d) -> b s n d', n=num_heads)
+    if _flash2_runtime_disabled or not _can_use_flash2(q, k, v):
+        return rearrange(
+            _sdpa_attention(q_flash, k_flash, v_flash, ctx_mask),
+            'b s n d -> b s (n d)',
+        )
+
     x = None
-    if ctx_mask is None:
-        x = _flash2_attention(q_flash, k_flash, v_flash)
-    elif ctx_mask.dtype == torch.bool and ctx_mask.ndim == 2:
-        x = _flash2_attention_with_2d_mask(q_flash, k_flash, v_flash,
-                                           ctx_mask)
-    elif ctx_mask.dtype == torch.bool and ctx_mask.ndim == 4:
-        x = _flash2_attention_with_batched_mask(q_flash, k_flash, v_flash,
-                                                ctx_mask)
+    try:
+        if ctx_mask is None:
+            x = _flash2_attention(q_flash, k_flash, v_flash)
+        elif ctx_mask.dtype == torch.bool and ctx_mask.ndim == 2:
+            x = _flash2_attention_with_2d_mask(q_flash, k_flash, v_flash,
+                                               ctx_mask)
+        elif ctx_mask.dtype == torch.bool and ctx_mask.ndim == 4:
+            x = _flash2_attention_with_batched_mask(q_flash, k_flash, v_flash,
+                                                    ctx_mask)
+    except RuntimeError as error:
+        if not _is_flash2_compatibility_error(error):
+            raise
+        _flash2_runtime_disabled = True
+        warnings.warn(
+            f'FlashAttention2 failed at runtime; using PyTorch SDPA for the '
+            f'remainder of this process. Original error: {error}',
+            RuntimeWarning,
+        )
     if x is None:
-        raise RuntimeError(
-            'FlashAttention2 could not represent this WAM attention mask; '
-            'fallback is disabled. Supported masks are None, full/causal 2D '
-            'bool masks, grouped-row 2D bool masks, and batched 4D bool masks '
-            f'whose per-sample masks satisfy the same rule. Got '
-            f'{_mask_description(ctx_mask)}.')
+        x = _sdpa_attention(q_flash, k_flash, v_flash, ctx_mask)
     return rearrange(x, 'b s n d -> b s (n d)', n=num_heads)
 
 

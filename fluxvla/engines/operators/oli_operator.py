@@ -582,7 +582,7 @@ class MrosOliOperator(OliOperator):
 
     def __init__(self,
                  finger_state_topic='/brainco1/hand/state',
-                 finger_cmd_topic='/brainco1/hand/cmd_vla',
+                 finger_cmd_topic='/brainco1/hand/cmd',
                  teleop_wbt_topic='/teleop_cmd_WBT',
                  **kwargs):
         self.finger_state_topic = finger_state_topic
@@ -748,11 +748,10 @@ class MrosOliOperator(OliOperator):
 
         left_val = 100.0 if action[40] >= 0.5 else 0.0
         right_val = 100.0 if action[41] >= 0.5 else 0.0
-        finger_cmd = np.zeros(14, dtype=np.float32)
+        finger_cmd = np.zeros(12, dtype=np.float32)
         finger_cmd[0:12:2] = left_val
         finger_cmd[1:12:2] = right_val
         finger_cmd[2:4] = 100.0
-        finger_cmd[12:14] = 2.0
         self.last_finger_cmd = finger_cmd
         finger_msg = Float32Array()
         finger_msg.data = finger_cmd.tolist()
