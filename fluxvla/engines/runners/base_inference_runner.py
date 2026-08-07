@@ -68,6 +68,8 @@ class BaseInferenceRunner:
         task_pose_sequences (Dict): Task pose sequences mapping.
         mixed_precision_dtype (str): Data type for mixed precision.
         enable_mixed_precision (bool): Whether to enable mixed precision.
+        low_cpu_mem_usage (bool): Build on meta and assign safetensors weights
+            without keeping a second model-sized CPU copy.
         remote_inference (Dict): Remote inference config.  When provided,
             model loading is skipped and inference is delegated to a ZMQ
             server.  Keys: ``server_host``, ``server_port``, ``timeout_s``,
@@ -94,6 +96,7 @@ class BaseInferenceRunner:
                  task_pose_sequences: Dict = None,
                  mixed_precision_dtype: str = 'float32',
                  enable_mixed_precision: bool = True,
+                 low_cpu_mem_usage: bool = False,
                  remote_inference: Dict = None,
                  **kwargs):
         from fluxvla.engines import (build_dataset_from_cfg,
@@ -121,18 +124,34 @@ class BaseInferenceRunner:
             dataset['model_path'] = os.path.dirname(os.path.dirname(ckpt_path))
             self.dataset = build_dataset_from_cfg(dataset)
 
-            self.vla = build_vla_from_cfg(cfg.inference_model)
             assert Path.exists(Path(ckpt_path)), \
                 f'Checkpoint path {ckpt_path} does not exist!'
-            if ckpt_path.endswith('.safetensors'):
+            if low_cpu_mem_usage and ckpt_path.endswith('.safetensors'):
+                model_cfg = cfg.inference_model.copy()
+                model_dtype = str_to_dtype(mixed_precision_dtype)
+                model_cfg['device'] = 'meta'
+                model_cfg['torch_dtype'] = model_dtype
+                default_dtype = torch.get_default_dtype()
+                try:
+                    torch.set_default_dtype(model_dtype)
+                    self.vla = build_vla_from_cfg(model_cfg)
+                finally:
+                    torch.set_default_dtype(default_dtype)
                 state_dict = load_file(ckpt_path, device='cpu')
+                self.vla.load_state_dict(
+                    state_dict, strict=True, assign=True)
+            elif ckpt_path.endswith('.safetensors'):
+                self.vla = build_vla_from_cfg(cfg.inference_model)
+                state_dict = load_file(ckpt_path, device='cpu')
+                self.vla.load_state_dict(state_dict, strict=True)
             else:
+                self.vla = build_vla_from_cfg(cfg.inference_model)
                 checkpoint = torch.load(ckpt_path, map_location='cpu')
                 if isinstance(checkpoint, dict) and 'model' in checkpoint:
                     state_dict = checkpoint['model']
                 else:
                     state_dict = checkpoint
-            self.vla.load_state_dict(state_dict, strict=True)
+                self.vla.load_state_dict(state_dict, strict=True)
         else:
             self.dataset = None
             self.denormalize_action = None

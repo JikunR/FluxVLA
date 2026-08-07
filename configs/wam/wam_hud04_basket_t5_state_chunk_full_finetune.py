@@ -221,7 +221,7 @@ model = dict(
     ),
 )
 
-inference_model = model
+inference_model = dict(**model, skip_load=True)
 
 train_dataloader = dict(
     per_device_batch_size=8,
@@ -295,6 +295,7 @@ inference = dict(
     action_chunk=_action_horizon,
     publish_rate=30,
     mixed_precision_dtype='bf16',
+    low_cpu_mem_usage=True,
     camera_names=['head', 'left_wrist'],
     dataset=dict(
         type='PrivateInferenceDataset',
