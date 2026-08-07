@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 / VCube basket data with state chunks plus a state-to-action
-# teacher-forced decoder.
+# WAM on HUD04 / VCube basket data with joint state-action chunk prediction:
+# one diffusion expert predicts a concatenated ``[state_chunks | actions]``
+# chunk, so state and action are supervised jointly instead of decoding
+# actions from predicted states with a separate teacher-forced decoder.
 
 import os
 
@@ -44,6 +46,7 @@ _basket_data_roots = [
 _action_dim = 64
 _proprio_dim = 64
 _action_horizon = 32
+_joint_chunk_dim = _proprio_dim + _action_dim
 _action_source_key = 'action'
 _state_chunk_source_key = 'observation.state'
 _action_window_start_idx = 0
@@ -151,6 +154,7 @@ model = dict(
     vla_head=dict(
         type='WAMStateChunkHead',
         action_dim=_action_dim,
+        joint_state_action=True,
         video_expert=dict(
             type='WanVideoDiT',
             checkpoint_root=_wan_checkpoint_root,
@@ -184,7 +188,10 @@ model = dict(
             pretrained_path=_action_dit,
             skip_load_from_pretrain=False,
             config=dict(
-                action_dim=_proprio_dim,
+                # One joint [state | action] chunk is denoised by the state
+                # expert; the head splits the predicted chunk back into state
+                # and action slices.
+                action_dim=_joint_chunk_dim,
                 hidden_dim=1024,
                 ffn_dim=4096,
                 num_heads=24,
@@ -196,17 +203,6 @@ model = dict(
                 use_gradient_checkpointing=True,
             ),
         ),
-        action_decoder=dict(
-            type='StateToActionDecoder',
-            state_dim=_proprio_dim,
-            action_dim=_action_dim,
-            hidden_dim=1024,
-            ffn_dim=4096,
-            num_layers=4,
-            num_heads=8,
-            dropout=0.0,
-            max_num_embodiments=32,
-        ),
         video_scheduler=dict(
             train_shift=5.0, infer_shift=5.0, num_train_timesteps=1000),
         action_scheduler=dict(
@@ -215,11 +211,11 @@ model = dict(
             lambda_video=0.0,
             lambda_action=0.0,
             lambda_forward_video=1.0,
-            lambda_idm_state=1.0,
-            lambda_policy_state=1.0,
+            lambda_idm_state_action=1.0,
+            lambda_policy_state_action=1.0,
             lambda_joint_video=0.0,
-            lambda_joint_state=0.0,
-            lambda_state_to_action=1.0,
+            lambda_joint_state_action=0.0,
+            lambda_state_to_action=0.0,
         ),
         video_cond_noise_prob=0.5,
     ),
@@ -259,7 +255,6 @@ runner = dict(
         betas=(0.9, 0.95),
     ),
     max_grad_norm=1.0,
-    save_iter_interval=1000,
     collator=dict(
         type='WAMModeCollator',
         mode='batch',

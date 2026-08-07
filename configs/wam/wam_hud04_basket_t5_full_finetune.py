@@ -13,6 +13,8 @@
 # limitations under the License.
 #
 # WAM on the HUD04 / VCube basket data with the Wan2.2 UMT5 text encoder.
+# One MoT forward jointly trains video generation (VGM/forward_video) and
+# policy action prediction via the FastWAM-style ``vgm_policy`` mode.
 
 import os
 
@@ -46,7 +48,13 @@ _action_horizon = 32
 _frame_window_size = 9
 _frame_sample_stride = 4
 _statistic_name = 'hud04_vcube'
-_mode_probs = dict(forward=1.0, idm=1.0, policy=1.0, joint=0.0)
+_mode_probs = dict(
+    forward=0.0,
+    idm=0.0,
+    policy=0.0,
+    joint=0.0,
+    vgm_policy=1.0,
+)
 seed = 42
 _prompt_template = (
     "A video recorded from a robot's point of view executing the following "
@@ -193,7 +201,7 @@ model = dict(
             lambda_video=0.0,
             lambda_action=0.0,
             lambda_forward_video=1.0,
-            lambda_idm_action=1.0,
+            lambda_idm_action=0.0,
             lambda_policy_action=1.0,
             lambda_joint_video=0.0,
             lambda_joint_action=0.0,
@@ -236,10 +244,9 @@ runner = dict(
         betas=(0.9, 0.95),
     ),
     max_grad_norm=1.0,
-    save_iter_interval=1000,
     collator=dict(
         type='WAMModeCollator',
-        mode='batch',
+        mode='vgm_policy',
         mode_probs=_mode_probs,
         keys=[
             'states',

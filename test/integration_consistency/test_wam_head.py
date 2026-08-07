@@ -26,6 +26,7 @@ from fluxvla.collators import WAMModeCollator
 from fluxvla.engines import HEADS
 from fluxvla.models.backbones.vlms.wan22_text_backbone import Wan22TextBackbone
 from fluxvla.models.heads.wam_head import WAMHead
+from fluxvla.models.heads.wam_state_chunk_head import WAMStateChunkHead
 from fluxvla.models.third_party_models.fastwam.modules.mot import MoT
 from fluxvla.models.vlas.wam_vla import WAMVLA
 from fluxvla.transforms.transform_prompts import LoadCachedTextEmbedding
@@ -591,6 +592,161 @@ class WAMConfigTest(unittest.TestCase):
         config_text = Path(path).read_text()
         self.assertIn('QWEN3VL_0_6B_PATH', config_text)
         self.assertNotIn('Wan22TextBackbone', config_text)
+
+
+class _FakeJointExpert(nn.Module):
+    """Minimal MoT-compatible expert for WAMStateChunkHead construction."""
+
+    def __init__(self, action_dim):
+        super().__init__()
+        self.action_dim = action_dim
+        self.blocks = nn.ModuleList()
+        self.num_heads = 2
+        self.attn_head_dim = 4
+
+
+class WAMStateChunkHeadJointTest(unittest.TestCase):
+    """Joint ``[state_chunks | actions]`` chunk prediction tests."""
+
+    @staticmethod
+    def _make_head(joint_state_action=True, action_dim=4, joint_dim=10):
+        return WAMStateChunkHead(
+            video_expert=_FakeJointExpert(0),
+            state_expert=_FakeJointExpert(joint_dim),
+            action_dim=action_dim,
+            joint_state_action=joint_state_action,
+            text_dim=8,
+            device='cpu',
+            torch_dtype=torch.float32,
+        )
+
+    def test_joint_head_dimensions(self):
+        head = self._make_head()
+        self.assertTrue(head.joint_state_action)
+        self.assertEqual(head.state_chunk_dim, 6)
+        self.assertEqual(head.controller_action_dim, 4)
+        self.assertIsNone(head.action_decoder)
+
+    def test_joint_head_rejects_bad_dimensions(self):
+        with self.assertRaises(ValueError):
+            self._make_head(action_dim=10, joint_dim=10)
+        with self.assertRaises(ValueError):
+            self._make_head(action_dim=12, joint_dim=10)
+
+    def test_joint_forward_concats_state_and_action(self):
+        head = self._make_head()
+        captured = {}
+
+        def fake_forward(self,
+                         input_latents,
+                         context,
+                         context_mask,
+                         action,
+                         action_is_pad=None,
+                         **kwargs):
+            captured['action'] = action
+            captured['action_is_pad'] = action_is_pad
+            return {
+                'loss': action.float().mean(),
+                'loss_idm_action': action.float().mean(),
+                'loss_policy_action': action.float().mean(),
+                'loss_joint_action': action.float().mean(),
+            }
+
+        original = WAMHead.forward
+        WAMHead.forward = fake_forward
+        try:
+            state_chunks = torch.randn(2, 4, 6)
+            action = torch.randn(2, 4, 4)
+            state_is_pad = torch.tensor([[0, 0, 1, 0], [0, 1, 0, 0]],
+                                        dtype=torch.bool)
+            action_is_pad = torch.tensor([[0, 0, 0, 1], [0, 0, 1, 0]],
+                                         dtype=torch.bool)
+            ret = head.forward(
+                input_latents=torch.randn(2, 3, 4),
+                context=torch.randn(2, 5, 8),
+                context_mask=torch.ones(2, 5, dtype=torch.bool),
+                action=action,
+                action_is_pad=action_is_pad,
+                state_chunks=state_chunks,
+                state_chunk_is_pad=state_is_pad,
+            )
+        finally:
+            WAMHead.forward = original
+
+        self.assertEqual(tuple(captured['action'].shape), (2, 4, 10))
+        torch.testing.assert_close(captured['action'][..., :6], state_chunks)
+        torch.testing.assert_close(captured['action'][..., 6:], action)
+        self.assertTrue((captured['action_is_pad'] == (state_is_pad
+                                                       | action_is_pad)).all())
+        self.assertIn('loss_idm_state_action', ret)
+        self.assertIn('loss_policy_state_action', ret)
+        self.assertIn('loss_joint_state_action', ret)
+        self.assertNotIn('loss_idm_action', ret)
+        self.assertEqual(ret['loss_state_to_action'].item(), 0.0)
+
+    def test_joint_predict_splits_state_and_action(self):
+        head = self._make_head()
+
+        def fake_predict_action(self, *args, **kwargs):
+            joint = torch.zeros(1, 4, 10)
+            joint[..., :6] = 1.0
+            joint[..., 6:] = 2.0
+            return joint
+
+        original = WAMHead.predict_action
+        WAMHead.predict_action = fake_predict_action
+        try:
+            pred_actions, pred_state_chunks = head.predict_action(
+                action_horizon=4, return_state_chunks=True)
+            pred_state_chunk = head.predict_state_chunk(action_horizon=4)
+        finally:
+            WAMHead.predict_action = original
+
+        self.assertEqual(tuple(pred_actions.shape), (1, 4, 4))
+        self.assertTrue((pred_actions == 2.0).all())
+        self.assertEqual(tuple(pred_state_chunks.shape), (1, 4, 6))
+        self.assertTrue((pred_state_chunks == 1.0).all())
+        self.assertEqual(tuple(pred_state_chunk.shape), (1, 4, 6))
+        self.assertTrue((pred_state_chunk == 1.0).all())
+
+    def test_legacy_state_chunk_head_unchanged(self):
+        head = self._make_head(joint_state_action=False, joint_dim=6)
+        self.assertFalse(head.joint_state_action)
+        self.assertEqual(head.state_chunk_dim, 6)
+        captured = {}
+
+        def fake_forward(self,
+                         input_latents,
+                         context,
+                         context_mask,
+                         action,
+                         action_is_pad=None,
+                         **kwargs):
+            captured['action'] = action
+            return {
+                'loss': action.float().mean(),
+                'loss_idm_action': action.float().mean(),
+                'loss_policy_action': action.float().mean(),
+                'loss_joint_action': action.float().mean(),
+            }
+
+        original = WAMHead.forward
+        WAMHead.forward = fake_forward
+        try:
+            ret = head.forward(
+                input_latents=torch.randn(2, 3, 4),
+                context=torch.randn(2, 5, 8),
+                context_mask=torch.ones(2, 5, dtype=torch.bool),
+                action=torch.randn(2, 4, 4),
+                state_chunks=torch.randn(2, 4, 6),
+            )
+        finally:
+            WAMHead.forward = original
+
+        self.assertEqual(tuple(captured['action'].shape), (2, 4, 6))
+        self.assertIn('loss_idm_state', ret)
+        self.assertNotIn('loss_idm_state_action', ret)
 
 
 if __name__ == '__main__':

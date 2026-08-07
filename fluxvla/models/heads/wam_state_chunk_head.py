@@ -30,12 +30,20 @@ _ACTION_DECODER_BUILDERS = {
 
 @HEADS.register_module()
 class WAMStateChunkHead(WAMHead):
-    """WAM variant that predicts state chunks before decoding actions.
+    """WAM variant that predicts state chunks and controller actions.
 
     The inherited MoT branch still uses the parent's internal ``action`` slot,
-    but semantically that slot is the state trajectory expert in this head.
-    A small teacher-forced decoder then maps GT/predicted state chunks to
-    action chunks.
+    but semantically that slot is the state/action chunk expert in this head.
+
+    Two operating modes are supported:
+
+    * ``joint_state_action=False`` (legacy): the MoT slot predicts state
+      chunks only, and a small teacher-forced decoder then maps GT/predicted
+      state chunks to action chunks.
+    * ``joint_state_action=True``: the MoT slot predicts one concatenated
+      ``[state_chunks | actions]`` chunk with a single diffusion expert, so
+      state and action are supervised jointly and the separate action decoder
+      is not used.
     """
 
     def __init__(
@@ -43,6 +51,7 @@ class WAMStateChunkHead(WAMHead):
         state_expert: Optional[Mapping[str, Any] | nn.Module] = None,
         action_decoder: Optional[Mapping[str, Any] | nn.Module] = None,
         action_dim: Optional[int] = None,
+        joint_state_action: bool = False,
         loss: Optional[Dict[str, Any]] = None,
         loss_lambda_state_to_action: float = 1.0,
         device: str = 'cpu',
@@ -55,13 +64,20 @@ class WAMStateChunkHead(WAMHead):
                     'Pass only one of `state_expert` and `action_expert`.')
             kwargs['action_expert'] = state_expert
 
+        joint_state_action = bool(joint_state_action)
         loss_cfg = dict(loss or {})
+        idm_state_key = ('lambda_idm_state_action'
+                         if joint_state_action else 'lambda_idm_state')
+        policy_state_key = ('lambda_policy_state_action'
+                            if joint_state_action else 'lambda_policy_state')
+        joint_state_key = ('lambda_joint_state_action'
+                           if joint_state_action else 'lambda_joint_state')
         loss_cfg.setdefault('lambda_idm_action',
-                            loss_cfg.get('lambda_idm_state', 1.0))
+                            loss_cfg.get(idm_state_key, 1.0))
         loss_cfg.setdefault('lambda_policy_action',
-                            loss_cfg.get('lambda_policy_state', 1.0))
+                            loss_cfg.get(policy_state_key, 1.0))
         loss_cfg.setdefault('lambda_joint_action',
-                            loss_cfg.get('lambda_joint_state', 1.0))
+                            loss_cfg.get(joint_state_key, 1.0))
         self.loss_lambda_state_to_action = float(
             loss_cfg.get('lambda_state_to_action',
                          loss_lambda_state_to_action))
@@ -83,6 +99,27 @@ class WAMStateChunkHead(WAMHead):
         )
         if self.action_decoder is not None:
             self.controller_action_dim = self.action_decoder.action_dim
+        self.joint_state_action = joint_state_action
+        if self.joint_state_action:
+            if self.action_decoder is not None:
+                raise ValueError(
+                    '`joint_state_action` cannot be combined with an '
+                    '`action_decoder`; the joint MoT slot already predicts '
+                    'state chunks and actions together.')
+            if self.controller_action_dim is None:
+                raise ValueError(
+                    '`action_dim` is required for joint state-action '
+                    'prediction.')
+            self.state_chunk_dim = (
+                self.action_expert.action_dim - self.controller_action_dim)
+            if self.state_chunk_dim <= 0:
+                raise ValueError(
+                    'Joint state-action `state_expert.action_dim` must be '
+                    'larger than `action_dim`; got '
+                    f'{self.action_expert.action_dim} vs '
+                    f'{self.controller_action_dim}.')
+        else:
+            self.state_chunk_dim = self.action_expert.action_dim
 
     def _build_action_decoder(
         self,
@@ -125,7 +162,16 @@ class WAMStateChunkHead(WAMHead):
         return builder(**cfg)
 
     @staticmethod
-    def _rename_state_loss_keys(ret: Dict[str, torch.Tensor]):
+    def _rename_state_loss_keys(ret: Dict[str, torch.Tensor],
+                                joint_state_action: bool = False):
+        if joint_state_action:
+            if 'loss_idm_action' in ret:
+                ret['loss_idm_state_action'] = ret.pop('loss_idm_action')
+            if 'loss_policy_action' in ret:
+                ret['loss_policy_state_action'] = ret.pop('loss_policy_action')
+            if 'loss_joint_action' in ret:
+                ret['loss_joint_state_action'] = ret.pop('loss_joint_action')
+            return
         if 'loss_idm_action' in ret:
             ret['loss_idm_state'] = ret.pop('loss_idm_action')
         if 'loss_policy_action' in ret:
@@ -233,20 +279,42 @@ class WAMStateChunkHead(WAMHead):
         state_target = self._to_model_dtype(state_target, device)
         state_target_is_pad = self._to_bool_mask(state_target_is_pad, device)
 
+        if self.joint_state_action:
+            if action_target is None:
+                raise ValueError(
+                    '`action` is required for joint state-action prediction.')
+            action_target = self._to_model_dtype(action_target, device)
+            action_target_is_pad = self._to_bool_mask(action_target_is_pad,
+                                                      device)
+            mot_action = torch.cat([state_target, action_target], dim=-1)
+            if state_target_is_pad is not None \
+                    and action_target_is_pad is not None:
+                mot_action_is_pad = state_target_is_pad | action_target_is_pad
+            else:
+                mot_action_is_pad = (
+                    state_target_is_pad if state_target_is_pad is not None else
+                    action_target_is_pad)
+        else:
+            mot_action = state_target
+            mot_action_is_pad = state_target_is_pad
+
         ret = super().forward(
             input_latents=input_latents,
             context=context,
             context_mask=context_mask,
-            action=state_target,
-            action_is_pad=state_target_is_pad,
+            action=mot_action,
+            action_is_pad=mot_action_is_pad,
             image_is_pad=image_is_pad,
             proprio=proprio,
             training_mode=training_mode,
             **kwargs,
         )
-        self._rename_state_loss_keys(ret)
+        self._rename_state_loss_keys(
+            ret, joint_state_action=self.joint_state_action)
 
         if self.action_decoder is None or action_target is None:
+            # Joint state-action prediction supervises actions inside the
+            # MoT slot, so there is no separate decoder loss to add.
             ret['loss_state_to_action'] = ret['loss'].detach().new_zeros(())
             return ret
         if proprio is None:
@@ -272,7 +340,10 @@ class WAMStateChunkHead(WAMHead):
 
     @torch.no_grad()
     def predict_state_chunk(self, *args, **kwargs) -> torch.Tensor:
-        return super().predict_action(*args, **kwargs)
+        pred = super().predict_action(*args, **kwargs)
+        if self.joint_state_action:
+            return pred[..., :self.state_chunk_dim]
+        return pred
 
     @torch.no_grad()
     def predict_action(
@@ -283,6 +354,13 @@ class WAMStateChunkHead(WAMHead):
         return_state_chunks: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        if self.joint_state_action:
+            pred_joint = super().predict_action(*args, **kwargs)
+            pred_state_chunks = pred_joint[..., :self.state_chunk_dim]
+            pred_actions = pred_joint[..., self.state_chunk_dim:]
+            if return_state_chunks:
+                return pred_actions, pred_state_chunks
+            return pred_actions
         pred_state_chunks = self.predict_state_chunk(*args, **kwargs)
         if self.action_decoder is None:
             return pred_state_chunks

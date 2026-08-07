@@ -261,8 +261,6 @@ runner = dict(
         betas=(0.9, 0.95),
     ),
     max_grad_norm=1.0,
-    save_iter_interval=1000,
-    max_keep_ckpts=10,
     collator=dict(
         type='WAMModeCollator',
         mode='batch',
