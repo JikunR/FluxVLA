@@ -16,7 +16,21 @@ keeps only the files needed by:
 - `fluxvla.transforms.transform_cosmos3`
 - `scripts/cosmos3_fluxvla_infer.py`
 
-Current subset size: 14 Python files.
+Current subset size: 15 Python files.
+
+Edge adaptation
+---------------
+
+- `nemotron_3_dense_vl.py` adapts the public Nemotron configuration, RMSNorm,
+  ReLU2 MLP, and multimodal RoPE from:
+  - `cosmos_framework/model/vfm/vlm/nemotron_3_dense_vl/`
+  - `cosmos_framework/model/vfm/mot/unified_mot.py`
+- `fluxvla/models/backbones/vlms/cosmos3/cosmos3_backbone.py` selects the
+  Qwen3-VL or Nemotron text components from the model configuration.
+- `fluxvla/models/backbones/vlms/cosmos3/cosmos3_mot_layer.py` contains their
+  shared dual-pathway MoT layer.
+
+Both files retain NVIDIA's OpenMDW-1.1 SPDX identifier.
 
 Kept modules
 ------------
@@ -47,8 +61,6 @@ FluxVLA does not vendor the upstream Cosmos3 training/inference stack:
   wrapper instead of exposing Cosmos3 checkpoints through HF `AutoModel`
 - dense Qwen3-VL config/model copies; the FluxVLA-native MoT wrapper imports
   the official `transformers.models.qwen3_vl` internals directly
-- empty upstream package marker files that are not needed under Python 3
-  namespace package resolution
 - upstream MoT wrapper file moved into the FluxVLA-native backbone package
 - upstream MoT memory utilities; reasoner generation uses the standard
   HuggingFace Qwen3-VL generation/cache path through the native wrapper

@@ -16,7 +16,6 @@ import torch.nn as nn
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 from fluxvla.engines import VLAS, initialize_overwatch
-from fluxvla.models.backbones.vlms.cosmos3 import Cosmos3MoTBackbone
 from fluxvla.models.projectors.linear_projector import \
     LinearProjector  # noqa: F401
 from fluxvla.models.third_party_models.cosmos3.data.vfm import sequence_packing
@@ -83,6 +82,7 @@ class Cosmos3FlowMatching(Cosmos3ComponentsMixin, Cosmos3ScheduleMixin,
         pretrained_name_or_path: Optional[str] = None,
         name_mapping: Optional[Dict] = None,
         strict_mapping: bool = False,
+        reinitialize_action_policy: bool = False,
         norm_stats: Optional[Dict] = None,
         torch_dtype: Optional[str | torch.dtype] = None,
     ) -> None:
@@ -142,6 +142,7 @@ class Cosmos3FlowMatching(Cosmos3ComponentsMixin, Cosmos3ScheduleMixin,
         self.enable_fps_modulation = enable_fps_modulation
         self.base_fps = base_fps
         self.enable_vision_loss = enable_vision_loss
+        self.reinitialize_action_policy = bool(reinitialize_action_policy)
         self.freeze_non_moe_vlm_backbone = bool(freeze_non_moe_vlm_backbone)
         if vision_vae is None:
             raise ValueError('Cosmos3FlowMatching requires '
@@ -223,6 +224,12 @@ class Cosmos3FlowMatching(Cosmos3ComponentsMixin, Cosmos3ScheduleMixin,
 
         vision_vae = self._modules.pop('vision_vae', None)
         visual = self.vlm_backbone.model._modules.pop('visual', None)
+        action_in_proj = action_out_proj = action_modality_embed = None
+        if self.reinitialize_action_policy and self.name_mapping:
+            action_in_proj = self._modules.pop('action_in_proj')
+            action_out_proj = self._modules.pop('action_out_proj')
+            action_modality_embed = self._parameters.pop(
+                'action_modality_embed')
         skipped_modules = []
         if vision_vae is not None:
             skipped_modules.append('VAE')
@@ -233,9 +240,18 @@ class Cosmos3FlowMatching(Cosmos3ComponentsMixin, Cosmos3ScheduleMixin,
                 f"Temporarily skipping Cosmos3 {', '.join(skipped_modules)} "
                 'while loading the transformer checkpoint; those weights are '
                 'loaded by their owning modules.')
+        if action_in_proj is not None:
+            overwatch.info(
+                'Keeping the Cosmos3 action policy freshly initialized for '
+                'LIBERO post-training.')
         try:
             super().from_pretrained()
         finally:
+            if action_in_proj is not None:
+                self._modules['action_in_proj'] = action_in_proj
+                self._modules['action_out_proj'] = action_out_proj
+                self._parameters[
+                    'action_modality_embed'] = action_modality_embed
             if visual is not None:
                 self.vlm_backbone.model._modules['visual'] = visual
             if vision_vae is not None:
@@ -406,6 +422,6 @@ class Cosmos3FlowMatching(Cosmos3ComponentsMixin, Cosmos3ScheduleMixin,
     def get_fsdp_wrapping_policy(self) -> Callable:
         return partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls=Cosmos3MoTBackbone.
-            fsdp_transformer_layer_cls(),
+            transformer_layer_cls=(
+                self.vlm_backbone.fsdp_transformer_layer_cls()),
         )
