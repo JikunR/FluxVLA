@@ -524,6 +524,13 @@ class Cosmos3MoTBackbone(Qwen3VLForConditionalGeneration):
     def fsdp_transformer_layer_cls(self):
         return {self.transformer_layer_cls}
 
+    def forward(self, *args, **kwargs):
+        if self.architecture_family == 'edge_nemotron':
+            raise NotImplementedError(
+                'Edge Nemotron backbone only supports packed forward; use '
+                'forward_packed().')
+        return super().forward(*args, **kwargs)
+
     def generate(self, *args, **kwargs):
         if self.architecture_family == 'edge_nemotron':
             raise NotImplementedError(
