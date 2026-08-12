@@ -349,7 +349,9 @@ def two_way_attention(
     packed_key_states: FactoredSequencePack | JointSequencePack,
     packed_value_states: FactoredSequencePack | JointSequencePack,
     backend: str | None = None,
-    full_key_states: FactoredSequencePack | JointSequencePack | None = None,
+    packed_key_states_normalized: FactoredSequencePack
+    | JointSequencePack
+    | None = None,
 ) -> FactoredSequencePack | JointSequencePack:
     """Run dense two-way MoT attention on packed sequences."""
     _check_backend(backend)
@@ -371,10 +373,12 @@ def two_way_attention(
         is_causal=True,
         backend=backend,
     ).flatten(-2, -1)
+    packed_key_normalized = (
+        packed_key_states_normalized
+        if packed_key_states_normalized is not None else packed_key_states)
     full_out = _packed_varlen_attention(
         full_q,
-        get_all_seq(packed_key_states if full_key_states is
-                    None else full_key_states),
+        get_all_seq(packed_key_normalized),
         get_all_seq(packed_value_states),
         full_q_offsets,
         sample_offsets,

@@ -2,119 +2,32 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-"""Cosmos3-Edge post-training on LIBERO-Object."""
-
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Cosmos3-Edge post-training on LIBERO-Object benchmark.
+#
+# Usage (8 GPU):
+#   torchrun --nproc-per-node=8 scripts/train.py \
+#     --config configs/cosmos3/cosmos3edge_libero_object_full_finetune.py
+#
+# LIBERO-specific settings:
+# * LIBERO: action_dim=10 (eef pos + rot6d + gripper),
+#   max_state_dim=64, 2 views.
+# * Video keys: observation.images.image + observation.images.wrist_image.
+# * Single dataset group (no multi-embodiment split).
+# * Cosmos3 uses LIBERO embodiment_id=5 for the action projector.
+# * 512×256 concat-view video (two 256×256 views: third-person left,
+#   wrist right).
 from copy import deepcopy
 
-eval = dict(
-    dataset=dict(
-        extra_tensor_keys=[
-            'conditioning_fps',
-            'prepend_state_to_action',
-        ],
-        img_buffer_len=1,
-        transforms=[
-            dict(
-                embodiment_id=5,
-                img_keys=[
-                    'agentview_image',
-                    'robot0_eye_in_hand_image',
-                ],
-                type='ProcessLiberoEvalInputs'),
-            dict(
-                conditioning_fps=20.0,
-                prepend_state_to_action=False,
-                type='SetCosmos3ActionMetadata'),
-            dict(
-                image_resize_strategy='resize-naive',
-                input_sizes=[
-                    [
-                        3,
-                        256,
-                        256,
-                    ],
-                    [
-                        3,
-                        256,
-                        256,
-                    ],
-                ],
-                means=[
-                    [
-                        127.5,
-                        127.5,
-                        127.5,
-                    ],
-                    [
-                        127.5,
-                        127.5,
-                        127.5,
-                    ],
-                ],
-                stds=[
-                    [
-                        127.5,
-                        127.5,
-                        127.5,
-                    ],
-                    [
-                        127.5,
-                        127.5,
-                        127.5,
-                    ],
-                ],
-                type='TransformImage'),
-            dict(
-                action_metadata=dict(
-                    append_viewpoint=False,
-                    conditioning_fps=20.0,
-                    frame_window_size=17,
-                    video_height=256,
-                    video_width=512),
-                cfg_dropout_rate=0.0,
-                max_len=512,
-                output_attention_mask_key='lang_masks',
-                output_key='lang_tokens',
-                tokenizer=dict(
-                    model_max_length=4096,
-                    model_path='./checkpoints/Cosmos3-Edge',
-                    padding_side='right',
-                    trust_remote_code=True,
-                    type='PretrainedTokenizer'),
-                type='ProcessCosmos3Prompt'),
-            dict(
-                gripper_key='robot0_gripper_qpos',
-                norm_type='mean_std',
-                out_key='states',
-                pos_key='robot0_eef_pos',
-                quat_key='robot0_eef_quat',
-                state_dim=64,
-                type='LiberoProprioFromInputs'),
-            dict(
-                frame_window_size=1,
-                num_views=2,
-                tile_direction='horizontal',
-                type='PrepareVideo'),
-        ],
-        type='LiberoParquetEvalDataset'),
-    denormalize_action=dict(
-        action_dim=10,
-        norm_type='quantile_rot',
-        type='DenormalizeLiberoFramewiseRot6DAction'),
-    enable_mixed_precision_training=True,
-    eval_chunk_size=16,
-    inference_seed=7,
-    mixed_precision_dtype='bf16',
-    model_family='cosmos3',
-    norm_stats_key='libero_object_no_noops',
-    num_inference_steps=30,
-    num_steps_wait=10,
-    num_trials_per_task=50,
-    resize_size=256,
-    seed=7,
-    task_ids=None,
-    task_suite_name='libero_object',
-    type='LiberoEvalRunner')
 model = dict(
     action_horizon=16,
     action_in_proj=dict(
@@ -454,3 +367,114 @@ train_dataloader = dict(
         type='DistributedRepeatingDataset'),
     per_device_batch_size=8,
     per_device_num_workers=4)
+
+
+eval = dict(
+    dataset=dict(
+        extra_tensor_keys=[
+            'conditioning_fps',
+            'prepend_state_to_action',
+        ],
+        img_buffer_len=1,
+        transforms=[
+            dict(
+                embodiment_id=5,
+                img_keys=[
+                    'agentview_image',
+                    'robot0_eye_in_hand_image',
+                ],
+                type='ProcessLiberoEvalInputs'),
+            dict(
+                conditioning_fps=20.0,
+                prepend_state_to_action=False,
+                type='SetCosmos3ActionMetadata'),
+            dict(
+                image_resize_strategy='resize-naive',
+                input_sizes=[
+                    [
+                        3,
+                        256,
+                        256,
+                    ],
+                    [
+                        3,
+                        256,
+                        256,
+                    ],
+                ],
+                means=[
+                    [
+                        127.5,
+                        127.5,
+                        127.5,
+                    ],
+                    [
+                        127.5,
+                        127.5,
+                        127.5,
+                    ],
+                ],
+                stds=[
+                    [
+                        127.5,
+                        127.5,
+                        127.5,
+                    ],
+                    [
+                        127.5,
+                        127.5,
+                        127.5,
+                    ],
+                ],
+                type='TransformImage'),
+            dict(
+                action_metadata=dict(
+                    append_viewpoint=False,
+                    conditioning_fps=20.0,
+                    frame_window_size=17,
+                    video_height=256,
+                    video_width=512),
+                cfg_dropout_rate=0.0,
+                max_len=512,
+                output_attention_mask_key='lang_masks',
+                output_key='lang_tokens',
+                tokenizer=dict(
+                    model_max_length=4096,
+                    model_path='./checkpoints/Cosmos3-Edge',
+                    padding_side='right',
+                    trust_remote_code=True,
+                    type='PretrainedTokenizer'),
+                type='ProcessCosmos3Prompt'),
+            dict(
+                gripper_key='robot0_gripper_qpos',
+                norm_type='mean_std',
+                out_key='states',
+                pos_key='robot0_eef_pos',
+                quat_key='robot0_eef_quat',
+                state_dim=64,
+                type='LiberoProprioFromInputs'),
+            dict(
+                frame_window_size=1,
+                num_views=2,
+                tile_direction='horizontal',
+                type='PrepareVideo'),
+        ],
+        type='LiberoParquetEvalDataset'),
+    denormalize_action=dict(
+        action_dim=10,
+        norm_type='quantile_rot',
+        type='DenormalizeLiberoFramewiseRot6DAction'),
+    enable_mixed_precision_training=True,
+    eval_chunk_size=16,
+    inference_seed=7,
+    mixed_precision_dtype='bf16',
+    model_family='cosmos3',
+    norm_stats_key='libero_object_no_noops',
+    num_inference_steps=30,
+    num_steps_wait=10,
+    num_trials_per_task=50,
+    resize_size=256,
+    seed=7,
+    task_ids=None,
+    task_suite_name='libero_object',
+    type='LiberoEvalRunner')

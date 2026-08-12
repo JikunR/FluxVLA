@@ -246,7 +246,7 @@ class Cosmos3TextAttention(nn.Module):
             get_gen_seq(packed_sin),
             unsqueeze_dim=1,
         )  # q_gen_: [N_gen,num_heads,head_dim], k_gen_: [N_gen,num_kv_heads,head_dim]
-        full_key_states = None
+        packed_key_states_normalized_ = None
         if self.use_und_k_norm_for_gen:
             _, k_und_for_gen_ = self.apply_rotary_pos_emb(
                 q_und,
@@ -255,7 +255,8 @@ class Cosmos3TextAttention(nn.Module):
                 get_und_seq(packed_sin),
                 unsqueeze_dim=1,
             )
-            full_key_states = from_und_gen_splits(k_und_for_gen_, k_gen_, pack)
+            packed_key_states_normalized_ = from_und_gen_splits(
+                k_und_for_gen_, k_gen_, pack)
 
         packed_query_states_ = from_und_gen_splits(
             q_und_, q_gen_, pack)  # [N_und+N_gen,num_heads,head_dim]
@@ -274,7 +275,7 @@ class Cosmos3TextAttention(nn.Module):
             packed_key_states_,
             packed_value_states_,
             backend=self.attention_backend,
-            full_key_states=full_key_states,
+            packed_key_states_normalized=packed_key_states_normalized_,
         )
 
         # Apply projections directly to get final results

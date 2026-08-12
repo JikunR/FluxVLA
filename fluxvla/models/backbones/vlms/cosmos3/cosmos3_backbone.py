@@ -255,9 +255,95 @@ class _Cosmos3Model(Qwen3VLModel):
 
 class _Cosmos3NemotronModel(nn.Module):
 
-    def __init__(self, language_model: _Cosmos3NemotronTextModel) -> None:
+    architecture_family = 'edge_nemotron'
+    transformer_layer_cls = _Cosmos3NemotronTextDecoderLayer
+
+    def __init__(self, config: Nemotron3DenseVLTextConfig) -> None:
         super().__init__()
-        self.language_model = language_model
+        self.config = config
+        self.language_model = _Cosmos3NemotronTextModel(config)
+
+    @staticmethod
+    def matches_config(config_dict: Mapping[str, Any]) -> bool:
+        nested = config_dict.get('text_config')
+        text_config = nested if isinstance(nested, Mapping) else config_dict
+        return (text_config.get('model_type') ==
+                Nemotron3DenseVLTextConfig.model_type)
+
+    @classmethod
+    def build_backbone_components(
+        cls,
+        config_dict: Mapping[str, Any],
+        *,
+        include_visual: bool,
+        packed_attention_backend: str,
+        text_config_overrides: Mapping[str, Any] | None,
+        vision_encoder_path: str | Path | None,
+        skip_init_weights: bool,
+    ) -> tuple[_Cosmos3NemotronModel, nn.Linear]:
+        if include_visual:
+            raise NotImplementedError(
+                'Cosmos3-Edge currently supports the Nemotron generator '
+                'tower without the SigLIP2 reasoner.')
+        if vision_encoder_path is not None:
+            raise ValueError(
+                'vision_encoder_path is only valid with include_visual=True.')
+
+        nested = config_dict.get('text_config')
+        text_dict = dict(nested) if isinstance(nested,
+                                               Mapping) else dict(config_dict)
+        text_dict['packed_attention_backend'] = packed_attention_backend
+        if text_config_overrides:
+            text_dict.update(dict(text_config_overrides))
+        if text_dict.get('num_hidden_layers') == 56:
+            text_dict['num_hidden_layers'] = 28
+        text_dict['tie_word_embeddings'] = False
+        text_config = Nemotron3DenseVLTextConfig(**text_dict)
+
+        parameter_dtype = cls._parameter_dtype(text_config.torch_dtype)
+        with cls._temporary_default_dtype(parameter_dtype):
+            if skip_init_weights:
+                with no_init_weights():
+                    return cls._build_components(text_config)
+            return cls._build_components(text_config)
+
+    @classmethod
+    def _build_components(
+        cls, text_config: Nemotron3DenseVLTextConfig
+    ) -> tuple[_Cosmos3NemotronModel, nn.Linear]:
+        model = cls(text_config)
+        lm_head = nn.Linear(
+            text_config.hidden_size, text_config.vocab_size, bias=False)
+        return model, lm_head
+
+    @staticmethod
+    def _parameter_dtype(value: str | torch.dtype | None) -> torch.dtype:
+        if isinstance(value, torch.dtype):
+            return value
+        if value is None:
+            return torch.get_default_dtype()
+        names = {
+            'bfloat16': torch.bfloat16,
+            'bf16': torch.bfloat16,
+            'float16': torch.float16,
+            'fp16': torch.float16,
+            'float32': torch.float32,
+            'fp32': torch.float32,
+        }
+        name = str(value).lower()
+        if name not in names:
+            raise ValueError(f'Unsupported parameter dtype: {value!r}.')
+        return names[name]
+
+    @staticmethod
+    @contextmanager
+    def _temporary_default_dtype(dtype: torch.dtype):
+        previous = torch.get_default_dtype()
+        torch.set_default_dtype(dtype)
+        try:
+            yield
+        finally:
+            torch.set_default_dtype(previous)
 
 
 @contextmanager
@@ -273,35 +359,6 @@ def _cosmos3_no_init_weights():
             yield
     finally:
         Qwen3VLPreTrainedModel.init_weights = original_qwen_init_weights
-
-
-def _parameter_dtype(value: str | torch.dtype | None) -> torch.dtype:
-    if isinstance(value, torch.dtype):
-        return value
-    if value is None:
-        return torch.get_default_dtype()
-    names = {
-        'bfloat16': torch.bfloat16,
-        'bf16': torch.bfloat16,
-        'float16': torch.float16,
-        'fp16': torch.float16,
-        'float32': torch.float32,
-        'fp32': torch.float32,
-    }
-    name = str(value).lower()
-    if name not in names:
-        raise ValueError(f'Unsupported parameter dtype: {value!r}.')
-    return names[name]
-
-
-@contextmanager
-def _temporary_default_dtype(dtype: torch.dtype):
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    try:
-        yield
-    finally:
-        torch.set_default_dtype(previous)
 
 
 @VLM_BACKBONES.register_module()
@@ -321,16 +378,21 @@ class Cosmos3MoTBackbone(Qwen3VLForConditionalGeneration):
         skip_init_weights: bool = False,
     ) -> None:
         config_dict = self._load_vlm_config(vlm_config)
-        model_type = self._model_type(config_dict)
-        if model_type == Nemotron3DenseVLTextConfig.model_type:
-            self._init_nemotron(
-                config_dict,
-                include_visual=include_visual,
-                packed_attention_backend=packed_attention_backend,
-                text_config_overrides=text_config_overrides,
-                vision_encoder_path=vision_encoder_path,
-                skip_init_weights=skip_init_weights,
-            )
+        is_nemotron = _Cosmos3NemotronModel.matches_config(config_dict)
+        if is_nemotron:
+            nn.Module.__init__(self)
+            self.model, self.lm_head = (
+                _Cosmos3NemotronModel.build_backbone_components(
+                    config_dict,
+                    include_visual=include_visual,
+                    packed_attention_backend=packed_attention_backend,
+                    text_config_overrides=text_config_overrides,
+                    vision_encoder_path=vision_encoder_path,
+                    skip_init_weights=skip_init_weights,
+                ))
+            self.config = self.model.config
+            self.architecture_family = self.model.architecture_family
+            self._transformer_layer_cls = self.model.transformer_layer_cls
         else:
             backbone_config = self._build_backbone_config(
                 vlm_config=config_dict,
@@ -352,63 +414,9 @@ class Cosmos3MoTBackbone(Qwen3VLForConditionalGeneration):
         self.text_config_overrides = self._build_text_config_overrides(
             text_config_overrides)
         self.vision_encoder_path = vision_encoder_path
-        if (model_type != Nemotron3DenseVLTextConfig.model_type
-                and include_visual and vision_encoder_path is not None):
+        if (not is_nemotron and include_visual
+                and vision_encoder_path is not None):
             self.load_visual_encoder_pretrained(vision_encoder_path)
-
-    @staticmethod
-    def _model_type(config_dict: Mapping[str, Any]) -> str:
-        nested = config_dict.get('text_config')
-        text_config = nested if isinstance(nested, Mapping) else config_dict
-        return str(text_config.get('model_type', 'qwen3_vl_text'))
-
-    def _init_nemotron(
-        self,
-        config_dict: Mapping[str, Any],
-        *,
-        include_visual: bool,
-        packed_attention_backend: str,
-        text_config_overrides: Mapping[str, Any] | None,
-        vision_encoder_path: str | Path | None,
-        skip_init_weights: bool,
-    ) -> None:
-        if include_visual:
-            raise NotImplementedError(
-                'Cosmos3-Edge currently supports the Nemotron generator '
-                'tower without the SigLIP2 reasoner.')
-        if vision_encoder_path is not None:
-            raise ValueError(
-                'vision_encoder_path is only valid with include_visual=True.')
-
-        nested = config_dict.get('text_config')
-        text_dict = dict(nested) if isinstance(nested,
-                                               Mapping) else dict(config_dict)
-        text_dict['packed_attention_backend'] = packed_attention_backend
-        if text_config_overrides:
-            text_dict.update(dict(text_config_overrides))
-        if text_dict.get('num_hidden_layers') == 56:
-            text_dict['num_hidden_layers'] = 28
-        text_dict['tie_word_embeddings'] = False
-        text_config = Nemotron3DenseVLTextConfig(**text_dict)
-
-        parameter_dtype = _parameter_dtype(text_config.torch_dtype)
-        with _temporary_default_dtype(parameter_dtype):
-            if skip_init_weights:
-                with no_init_weights():
-                    self._init_nemotron_model(text_config)
-            else:
-                self._init_nemotron_model(text_config)
-        self.config = text_config
-        self.architecture_family = 'edge_nemotron'
-        self._transformer_layer_cls = _Cosmos3NemotronTextDecoderLayer
-
-    def _init_nemotron_model(self,
-                             text_config: Nemotron3DenseVLTextConfig) -> None:
-        nn.Module.__init__(self)
-        language_model = _Cosmos3NemotronTextModel(text_config)
-        self.model = _Cosmos3NemotronModel(language_model)
-        self.lm_head = nn.Linear(
-            text_config.hidden_size, text_config.vocab_size, bias=False)
 
     def load_visual_encoder_pretrained(self, path: str | Path) -> None:
         visual = getattr(self.model, 'visual', None)
