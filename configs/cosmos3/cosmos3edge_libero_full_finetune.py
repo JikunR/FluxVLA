@@ -24,8 +24,9 @@
 # * Video keys: observation.images.image + observation.images.wrist_image.
 # * Mixed dataset group: spatial + object + goal + 10 no-noops suites.
 # * Cosmos3 uses LIBERO embodiment_id=5 for the action projector.
-# * 512×256 concat-view video (two 256×256 views: third-person left,
-#   wrist right).
+# * 192×320 (H×W) model canvas: two 256×256 views → 512×256 concat →
+#   aspect-preserving resize + bottom reflection pad; third-person left,
+#   wrist right.
 from copy import deepcopy
 
 model = dict(
@@ -292,9 +293,10 @@ train_dataloader = dict(
                         append_viewpoint=False,
                         conditioning_fps=20.0,
                         frame_window_size=17,
-                        video_height=256,
-                        video_width=512),
+                        video_height=192,
+                        video_width=320),
                     cfg_dropout_rate=0.1,
+                    format_prompt_as_json=True,
                     max_len=512,
                     tokenizer=dict(
                         model_max_length=4096,
@@ -325,6 +327,10 @@ train_dataloader = dict(
                     num_views=2,
                     tile_direction='horizontal',
                     type='PrepareVideo'),
+                dict(
+                    height=192,
+                    type='ResizeAndReflectPad',
+                    width=320),
             ],
             type='ParquetDataset',
             use_delta=False,
@@ -397,7 +403,7 @@ eval = dict(
                 prepend_state_to_action=False,
                 type='SetCosmos3ActionMetadata'),
             dict(
-                image_resize_strategy='resize-naive',
+                image_resize_strategy='resize-crop',
                 input_sizes=[
                     [
                         3,
@@ -440,9 +446,10 @@ eval = dict(
                     append_viewpoint=False,
                     conditioning_fps=20.0,
                     frame_window_size=17,
-                    video_height=256,
-                    video_width=512),
+                    video_height=192,
+                    video_width=320),
                 cfg_dropout_rate=0.0,
+                format_prompt_as_json=True,
                 max_len=512,
                 output_attention_mask_key='lang_masks',
                 output_key='lang_tokens',
@@ -466,6 +473,10 @@ eval = dict(
                 num_views=2,
                 tile_direction='horizontal',
                 type='PrepareVideo'),
+            dict(
+                height=192,
+                type='ResizeAndReflectPad',
+                width=320),
         ],
         type='LiberoParquetEvalDataset'),
     denormalize_action=dict(
