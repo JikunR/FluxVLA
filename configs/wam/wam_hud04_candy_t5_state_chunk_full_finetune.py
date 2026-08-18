@@ -46,7 +46,7 @@ _wan_tokenizer_path = os.path.join(_wan_checkpoint_root, 'google/umt5-xxl')
 _text_cache_dir = os.path.abspath(
     os.environ.get(
         'WAM_TEXT_CACHE_DIR',
-        '/mnt/data/cpfs/users/jikun/vcube_data/wam_text_embeds_cache/hud04_candy',  # noqa: E501
+        os.path.join(_ckpt_root, 'hud04', 'text_embeds_cache'),
     ))
 
 _data_root = (
@@ -82,6 +82,14 @@ seed = 42
 _prompt_template = (
     "A video recorded from a robot's point of view executing the following "
     'instruction: {task}')
+_task_prompts = [
+    'pick up the white candy and place it in the left section of the snack '
+    'tray with left arm',
+    'pick up the purple candy and place it in the right section of the snack '
+    'tray with left arm',
+    'pick up the red candy and place it in the middle section of the snack '
+    'tray with left arm',
+]
 
 
 def _vcube_pipeline(embodiment_id: int):
@@ -245,14 +253,7 @@ model = dict(
     ),
 )
 
-inference_model = dict(
-    model,
-    vlm_backbone=dict(
-        type='Wan22TextBackbone',
-        checkpoint_root=_wan_checkpoint_root,
-        torch_dtype='bf16',
-    ),
-)
+inference_model = dict(**model, skip_load=True)
 
 train_dataloader = dict(
     per_device_batch_size=8,
@@ -310,4 +311,72 @@ runner = dict(
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
+)
+
+inference = dict(
+    type='OliInferenceRunner',
+    task_suite_name=_statistic_name,
+    task_descriptions={
+        '1': _task_prompts[0],
+        '2': _task_prompts[1],
+        '3': _task_prompts[2],
+    },
+    seed=7,
+    state_dim=_proprio_dim,
+    action_chunk=_action_horizon,
+    publish_rate=30,
+    mixed_precision_dtype='bf16',
+    low_cpu_mem_usage=True,
+    camera_names=['head', 'left_wrist'],
+    dataset=dict(
+        type='PrivateInferenceDataset',
+        statistic_name=_statistic_name,
+        embodiment_id=0,
+        img_keys=['head', 'left_wrist'],
+        transforms=[
+            dict(type='ResizeImages', height=240, width=320),
+            dict(
+                type='NormalizeImages',
+                means=[0.5, 0.5, 0.5],
+                stds=[0.5, 0.5, 0.5],
+                scale_to_unit_interval=True,
+            ),
+            dict(
+                type='NormalizeStatesAndActions',
+                action_dim=_action_dim,
+                state_dim=_proprio_dim,
+                state_key='proprio',
+                action_key='action',
+                norm_type='mean_std',
+            ),
+            dict(
+                type='PrepareVideo',
+                num_views=2,
+                frame_window_size=1,
+                tile_direction='vertical',
+            ),
+            dict(
+                type='LoadCachedTextEmbedding',
+                cache_dir=_text_cache_dir,
+                context_len=128,
+                enc_id='wan22ti2v5b',
+                prompt_template=_prompt_template,
+            ),
+        ],
+    ),
+    denormalize_action=dict(
+        type='DenormalizePrivateAction',
+        statistic_name=_statistic_name,
+        norm_type='mean_std',
+        action_dim=52,
+    ),
+    operator=dict(
+        type='MrosOliOperator',
+        head_rgb_topic='/head/color/image_raw/compressed',
+        left_wrist_rgb_topic=('/left_wrist_camera/color/image_raw/compressed'),
+        joint_state_topic='/joint/state',
+        finger_state_topic='/brainco1/hand/state',
+        finger_cmd_topic='/brainco1/hand/cmd',
+        teleop_wbt_topic='/teleop_cmd_WBT',
+    ),
 )
