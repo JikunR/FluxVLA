@@ -584,10 +584,12 @@ class MrosOliOperator(OliOperator):
                  finger_state_topic='/brainco1/hand/state',
                  finger_cmd_topic='/brainco1/hand/cmd',
                  teleop_wbt_topic='/teleop_cmd_WBT',
+                 use_finger_state=False,
                  **kwargs):
         self.finger_state_topic = finger_state_topic
         self.finger_cmd_topic = finger_cmd_topic
         self.teleop_wbt_topic = teleop_wbt_topic
+        self.use_finger_state = use_finger_state
         self.last_finger_state = np.zeros(12, dtype=np.float32)
         self._accum_base_pos = np.array([0.0, 0.0, 0.9], dtype=np.float64)
         self._accum_base_yaw = 0.0
@@ -648,7 +650,7 @@ class MrosOliOperator(OliOperator):
         return None
 
     def get_frame(self, timeout=0.05):
-        """Return two RGB views and the 33-dim WBT state vector."""
+        """Return two RGB views and the configured WBT state vector."""
         head_img = self._read_compressed_rgb_image(
             self.color_subscriber, timeout)
         left_wrist_img = self._read_compressed_rgb_image(
@@ -671,12 +673,16 @@ class MrosOliOperator(OliOperator):
             if finger_state.size >= 12:
                 self.last_finger_state = finger_state[:12].copy()
 
-        left_closed = float(np.mean(self.last_finger_cmd[0:12:2])) > 20.0
-        right_closed = float(np.mean(self.last_finger_cmd[1:12:2])) > 20.0
-        state = np.concatenate([
-            joint_state[:31],
-            np.array([left_closed, right_closed], dtype=np.float32),
-        ])
+        if self.use_finger_state:
+            hand_state = self.last_finger_state
+        else:
+            left_closed = float(np.mean(
+                self.last_finger_cmd[0:12:2])) > 20.0
+            right_closed = float(np.mean(
+                self.last_finger_cmd[1:12:2])) > 20.0
+            hand_state = np.array(
+                [left_closed, right_closed], dtype=np.float32)
+        state = np.concatenate([joint_state[:31], hand_state])
         return head_img, left_wrist_img, state
 
     @staticmethod
@@ -696,15 +702,17 @@ class MrosOliOperator(OliOperator):
         return keypoint
 
     def send_action(self, action):
-        """Publish a 42-dim action through the standard WBT MROS topics."""
+        """Publish a WBT action using the configured hand representation."""
         from mros.controller_msgs.msg import JointCmd
         from mros.std_msgs.msg import Float32Array
         from mros.teleop_msgs.msg import TeleopMsg
 
         action = np.asarray(action, dtype=np.float64)
-        if action.shape != (42, ):
+        expected_dim = 52 if self.use_finger_state else 42
+        if action.shape != (expected_dim, ):
             raise ValueError(
-                f'MrosOliOperator expects a (42,) action, got {action.shape}')
+                f'MrosOliOperator expects a ({expected_dim},) action, '
+                f'got {action.shape}')
         if not np.all(np.isfinite(action)):
             raise ValueError('MrosOliOperator received a non-finite action')
         if _is_degenerate_rot6d(action[34:40]):
@@ -746,12 +754,15 @@ class MrosOliOperator(OliOperator):
             'base_link', self._accum_base_pos, base_quat_xyzw)]
         self.teleop_wbt_publisher.publish(teleop_msg)
 
-        left_val = 100.0 if action[40] >= 0.5 else 0.0
-        right_val = 100.0 if action[41] >= 0.5 else 0.0
-        finger_cmd = np.zeros(12, dtype=np.float32)
-        finger_cmd[0:12:2] = left_val
-        finger_cmd[1:12:2] = right_val
-        finger_cmd[2:4] = 100.0
+        if self.use_finger_state:
+            finger_cmd = action[40:52].astype(np.float32)
+        else:
+            left_val = 100.0 if action[40] >= 0.5 else 0.0
+            right_val = 100.0 if action[41] >= 0.5 else 0.0
+            finger_cmd = np.zeros(12, dtype=np.float32)
+            finger_cmd[0:12:2] = left_val
+            finger_cmd[1:12:2] = right_val
+            finger_cmd[2:4] = 100.0
         self.last_finger_cmd = finger_cmd
         finger_msg = Float32Array()
         finger_msg.data = finger_cmd.tolist()

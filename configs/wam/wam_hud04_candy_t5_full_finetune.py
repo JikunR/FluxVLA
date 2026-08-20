@@ -362,6 +362,7 @@ inference = dict(
         left_wrist_rgb_topic=('/left_wrist_camera/color/image_raw/compressed'),
         joint_state_topic='/joint/state',
         finger_state_topic='/brainco1/hand/state',
+        use_finger_state=True,
         finger_cmd_topic='/brainco1/hand/cmd',
         teleop_wbt_topic='/teleop_cmd_WBT',
     ),

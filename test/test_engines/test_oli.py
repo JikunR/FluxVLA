@@ -119,6 +119,7 @@ def test_mros_oli_operator_publishes_wbt_teleop_message(monkeypatch):
     operator = MrosOliOperator.__new__(MrosOliOperator)
     operator._accum_base_pos = np.array([0.0, 0.0, 0.9])
     operator._accum_base_yaw = 0.0
+    operator.use_finger_state = False
     operator.last_finger_cmd = np.zeros(12, dtype=np.float32)
     operator.teleop_wbt_publisher = Publisher()
     operator.finger_publisher = Publisher()
@@ -156,6 +157,68 @@ def test_mros_oli_operator_publishes_wbt_teleop_message(monkeypatch):
     ]
 
 
+def test_mros_oli_operator_publishes_full_finger_action(monkeypatch):
+    from fluxvla.engines.operators.oli_operator import MrosOliOperator
+
+    class JointCmd:
+        pass
+
+    class Float32Array:
+        pass
+
+    class TeleopMsg:
+
+        def __init__(self):
+            self.header = SimpleNamespace(frame_id='')
+            self.world = SimpleNamespace(
+                orientation=SimpleNamespace(w=0.0))
+
+    class KeyPoint:
+
+        def __init__(self):
+            self.name = ''
+            self.pose = SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                orientation=SimpleNamespace(
+                    x=0.0, y=0.0, z=0.0, w=1.0))
+
+    controller_msg_module = types.ModuleType('mros.controller_msgs.msg')
+    std_msg_module = types.ModuleType('mros.std_msgs.msg')
+    teleop_msg_module = types.ModuleType('mros.teleop_msgs.msg')
+    controller_msg_module.JointCmd = JointCmd
+    std_msg_module.Float32Array = Float32Array
+    teleop_msg_module.TeleopMsg = TeleopMsg
+    teleop_msg_module.KeyPoint = KeyPoint
+    monkeypatch.setitem(
+        sys.modules, 'mros.controller_msgs.msg', controller_msg_module)
+    monkeypatch.setitem(sys.modules, 'mros.std_msgs.msg', std_msg_module)
+    monkeypatch.setitem(
+        sys.modules, 'mros.teleop_msgs.msg', teleop_msg_module)
+
+    class Publisher:
+
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    operator = MrosOliOperator.__new__(MrosOliOperator)
+    operator._accum_base_pos = np.array([0.0, 0.0, 0.9])
+    operator._accum_base_yaw = 0.0
+    operator.use_finger_state = True
+    operator.last_finger_cmd = np.zeros(12, dtype=np.float32)
+    operator.teleop_wbt_publisher = Publisher()
+    operator.finger_publisher = Publisher()
+
+    action = np.zeros(52, dtype=np.float64)
+    action[34:40] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    action[40:52] = np.arange(12, dtype=np.float64)
+    operator.send_action(action)
+
+    assert operator.finger_publisher.messages[0].data == list(range(12))
+
+
 def test_wam_config_uses_standard_mros_teleop_topics():
     import os
 
@@ -166,3 +229,15 @@ def test_wam_config_uses_standard_mros_teleop_topics():
     assert cfg.inference.operator.type == 'MrosOliOperator'
     assert cfg.inference.operator.teleop_wbt_topic == '/teleop_cmd_WBT'
     assert cfg.inference.operator.finger_cmd_topic == '/brainco1/hand/cmd'
+
+
+def test_candy_configs_use_full_finger_state():
+    import os
+
+    from mmengine import Config
+    for filename in (
+            'wam_hud04_candy_t5_full_finetune.py',
+            'wam_hud04_candy_t5_state_chunk_full_finetune.py'):
+        path = os.path.join('configs', 'wam', filename)
+        cfg = Config.fromfile(path)
+        assert cfg.inference.operator.use_finger_state is True
