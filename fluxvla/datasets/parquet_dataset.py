@@ -63,7 +63,8 @@ class ParquetDataset(Dataset):
                  expose_index: bool = False,
                  supervise_terminal_padding: bool = False,
                  action_dtype: Optional[str] = 'float32',
-                 expected_dataset_version: Optional[str] = None) -> None:
+                 expected_dataset_version: Optional[str] = None,
+                 state_chunk_key: Optional[str] = None) -> None:
         """Initialize the Parquet dataset.
 
         Args:
@@ -122,6 +123,8 @@ class ParquetDataset(Dataset):
             expected_dataset_version (str, optional): Expected FluxVLA dataset
                 content version. If omitted, no version check is performed so
                 existing local datasets remain usable.
+            state_chunk_key (str, optional): Source key for an additional
+                future-state chunk window. If None, no extra field is added.
         """
         super().__init__()
         if not 0 < train_episode_fraction <= 1:
@@ -206,6 +209,7 @@ class ParquetDataset(Dataset):
         self.require_full_window = require_full_window
         self.expose_index = expose_index
         self.supervise_terminal_padding = supervise_terminal_padding
+        self.state_chunk_key = state_chunk_key
         for transform in transforms:
             self.transforms.append(build_transform_from_cfg(transform))
 
@@ -363,6 +367,49 @@ class ParquetDataset(Dataset):
         """Assemble an action window using the configured source dtype."""
         return np.array(actions, dtype=self.action_dtype)
 
+    def _build_temporal_window(self, index: int, dataset_idx: int,
+                               data: Dict[str, Any], source_key: str,
+                               window_start_idx: int, use_delta: bool):
+        values = list()
+        masks = list()
+        window_idx = window_start_idx
+        while len(values) < self.action_window_size:
+            value_index = index + window_idx
+            valid_window_index = self._same_episode_and_dataset(
+                value_index, dataset_idx, data)
+            value_task = (
+                self._get_task_name(dataset_idx, value_index)
+                if valid_window_index else None)
+            if valid_window_index and value_task not in ('empty', 'static'):
+                if use_delta:
+                    values.append(
+                        (np.array(self.dataset[value_index][source_key]) -
+                         np.array(self.dataset[value_index -
+                                               1][source_key])).tolist())
+                else:
+                    values.append(self.dataset[value_index][source_key])
+                masks.append(1)
+            elif value_task == 'empty':
+                fill_value = values[-1] if values else data[source_key]
+                for _ in range(self.action_window_size - len(values)):
+                    values.append(fill_value)
+                    masks.append(0)
+                break
+            elif value_task == 'static':
+                window_idx += 1
+                continue
+            else:
+                if len(values) > 0:
+                    values.append(values[-1])
+                else:
+                    values.append(data[source_key])
+                masks.append(0)
+            window_idx += 1
+        return (
+            np.array(values, dtype=np.float32),
+            np.array(masks, dtype=np.float32),
+        )
+
     def __getitem__(self, index, dataset_statistics):
         index = self._resolve_index(index)
         data = self.dataset[index]
@@ -408,6 +455,17 @@ class ParquetDataset(Dataset):
                 action_masks.append(
                     1 if self.supervise_terminal_padding else 0)
             window_idx += 1
+        if self.state_chunk_key is not None:
+            state_chunks, state_chunk_masks = self._build_temporal_window(
+                index=index,
+                dataset_idx=dataset_idx,
+                data=data,
+                source_key=self.state_chunk_key,
+                window_start_idx=1,
+                use_delta=False,
+            )
+            data['state_chunks'] = state_chunks
+            data['state_chunk_masks'] = state_chunk_masks
         # Collect forward-looking frame timestamps for video models
         if self.frame_window_size > 1:
             frame_timestamps = [data['timestamp']]
@@ -554,11 +612,20 @@ class LiberoParquetEvalDataset:
             data = t(data)
         replay_img = data.get('replay_img', None)
 
-        assert 'lang_tokens' in data and 'lang_masks' in data, \
-            'Prompt transform must provide lang_tokens and lang_masks'
-        tokens = torch.tensor(data['lang_tokens'])
-        token_mask = data['lang_masks'].tolist() if hasattr(
-            data['lang_masks'], 'tolist') else list(data['lang_masks'])
+        has_lang_tokens = 'lang_tokens' in data or 'lang_masks' in data
+        has_context = 'context' in data or 'context_mask' in data
+        if has_lang_tokens and ('lang_tokens' not in data
+                                or 'lang_masks' not in data):
+            raise KeyError(
+                '`lang_tokens` and `lang_masks` must be provided together.')
+        missing_context = 'context' not in data or 'context_mask' not in data
+        if has_context and missing_context:
+            raise KeyError(
+                '`context` and `context_mask` must be provided together.')
+        if not has_lang_tokens and not has_context:
+            raise AssertionError(
+                'Prompt transform must provide either '
+                '`lang_tokens/lang_masks` or `context/context_mask`.')
 
         # Proprio
         img_masks = data.get('img_masks', None)
@@ -582,9 +649,18 @@ class LiberoParquetEvalDataset:
         batch: Dict[str, Any] = dict(
             images=pixel_values.cuda().unsqueeze(0),
             img_masks=torch.tensor([img_masks]).cuda(),
-            lang_tokens=tokens.unsqueeze(0).cuda(),
-            lang_masks=torch.tensor(token_mask).unsqueeze(0).cuda(),
         )
+        if has_context:
+            batch['context'] = torch.as_tensor(
+                data['context']).unsqueeze(0).cuda()
+            batch['context_mask'] = torch.as_tensor(
+                data['context_mask']).unsqueeze(0).cuda()
+        if has_lang_tokens:
+            tokens = torch.tensor(data['lang_tokens'])
+            token_mask = data['lang_masks'].tolist() if hasattr(
+                data['lang_masks'], 'tolist') else list(data['lang_masks'])
+            batch['lang_tokens'] = tokens.unsqueeze(0).cuda()
+            batch['lang_masks'] = torch.tensor(token_mask).unsqueeze(0).cuda()
 
         if 'states' in data:
             batch['states'] = torch.from_numpy(
@@ -645,7 +721,8 @@ class PrivateInferenceDataset:
         self.transforms = list()
         for transform in transforms:
             transform = dict(transform)
-            transform.setdefault('model_path', model_path)
+            if transform.get('type') != 'LoadCachedTextEmbedding':
+                transform.setdefault('model_path', model_path)
             self.transforms.append(build_transform_from_cfg(transform))
         if isinstance(norm_stats, str):
             with open(norm_stats, 'r', encoding='utf-8') as f:
@@ -686,12 +763,21 @@ class PrivateInferenceDataset:
                 inputs['images']).unsqueeze(0).cuda(),  # noqa: E501
             img_masks=torch.tensor([[True for _ in range(len(self.img_keys))]
                                     ]).cuda(),  # noqa: E501
-            lang_tokens=torch.from_numpy(
-                inputs['lang_tokens']).unsqueeze(0).cuda(),
-            lang_masks=torch.from_numpy(
-                inputs['lang_masks']).unsqueeze(0).cuda(),
             states=torch.from_numpy(
                 inputs['states']).float().cuda().unsqueeze(0))
+        if 'context' in inputs or 'context_mask' in inputs:
+            if 'context' not in inputs or 'context_mask' not in inputs:
+                raise KeyError(
+                    '`context` and `context_mask` must be provided together.')
+            batch['context'] = torch.as_tensor(
+                inputs['context']).unsqueeze(0).cuda()
+            batch['context_mask'] = torch.as_tensor(
+                inputs['context_mask']).unsqueeze(0).cuda()
+        else:
+            batch['lang_tokens'] = torch.from_numpy(
+                inputs['lang_tokens']).unsqueeze(0).cuda()
+            batch['lang_masks'] = torch.from_numpy(
+                inputs['lang_masks']).unsqueeze(0).cuda()
         if 'embodiment_ids' in inputs:
             batch['embodiment_ids'] = torch.from_numpy(
                 np.asarray(inputs['embodiment_ids'])).int().cuda().unsqueeze(0)

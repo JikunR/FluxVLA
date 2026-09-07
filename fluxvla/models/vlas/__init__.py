@@ -32,6 +32,7 @@ import_heterogeneous_runtime_symbols(
         'x_vla': ['X_VLA'],
         'dreamzero_vla': ['DreamZeroVLA'],
         'fastwam_vla': ['FastWAMVLA'],
+        'wam_vla': ['WAMVLA'],
         'cosmos3_flowmatching': ['Cosmos3FlowMatching'],
     },
 )

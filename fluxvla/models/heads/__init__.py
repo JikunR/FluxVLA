@@ -27,5 +27,7 @@ import_heterogeneous_runtime_symbols(
         'xvla_head': ['XVLAFlowMatchingHead'],
         'dreamzero_head': ['DreamZeroHead'],
         'fastwam_head': ['FastWAMHead', 'FastWAMJointHead', 'FastWAMIDMHead'],
+        'wam_head': ['WAMHead'],
+        'wam_state_chunk_head': ['WAMStateChunkHead'],
     },
 )

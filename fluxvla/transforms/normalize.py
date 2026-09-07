@@ -447,6 +447,9 @@ class NormalizeStatesAndActions:
         mark_all_action_steps_valid (bool): Replace the temporal action mask
             with a mask that enables ``valid_action_dim`` dimensions at every
             action step. Defaults to False.
+        state_chunk_key (str | None): Optional key for future state chunks.
+            When present, it is normalized and padded with the same state
+            statistics and dimensions as ``states``.
     """
 
     def __init__(self,
@@ -473,6 +476,7 @@ class NormalizeStatesAndActions:
                  valid_action_dim: int = None,
                  mark_all_action_steps_valid: bool = False,
                  output_dtype: Optional[str] = None,
+                 state_chunk_key: Optional[str] = None,
                  *args,
                  **kwargs):
         self.state_key = state_key
@@ -494,6 +498,7 @@ class NormalizeStatesAndActions:
                 and not np.issubdtype(self.output_dtype, np.floating)):
             raise ValueError(
                 f'output_dtype must be a floating dtype, got {output_dtype!r}')
+        self.state_chunk_key = state_chunk_key
         if action_norm_mask is not None:
             if (action_dim is not None and len(action_norm_mask) > action_dim):
                 raise ValueError(
@@ -544,6 +549,12 @@ class NormalizeStatesAndActions:
                     f'dimension {actions.shape[-1]}, got '
                     f'{len(self.action_norm_mask)}.')
             actions = self._zero_padded_delta_action_dims(data, actions)
+        state_chunks = None
+        if self.state_chunk_key is not None and self.state_chunk_key in data:
+            state_chunks = (
+                np.asarray(data[self.state_chunk_key])
+                if self.preserve_input_dtype else np.asarray(
+                    data[self.state_chunk_key], dtype=np.float32))
 
         needs_state_stats = (
             self.normalize_states and self.state_norm_type != 'none')
@@ -552,6 +563,7 @@ class NormalizeStatesAndActions:
         if needs_state_stats or needs_action_stats:
             assert 'stats' in data, "Input data must contain 'stats' key"
 
+        state_stats = None
         if needs_state_stats:
             state_stats = data['stats'][self.state_key]
             states = self._normalize_mixed(
@@ -562,6 +574,17 @@ class NormalizeStatesAndActions:
         if self.output_dtype is not None:
             states = np.asarray(states, dtype=self.output_dtype)
         data['states'] = states
+        if state_chunks is not None:
+            if needs_state_stats:
+                state_chunks = self._normalize_mixed(
+                    state_chunks,
+                    state_stats,
+                    self.state_norm_type,
+                    discrete_dims=self.discrete_state_dims)
+            if self.output_dtype is not None:
+                state_chunks = np.asarray(
+                    state_chunks, dtype=self.output_dtype)
+            data[self.state_chunk_key] = state_chunks
 
         if actions is not None:
             if needs_action_stats:
@@ -578,6 +601,9 @@ class NormalizeStatesAndActions:
         if self.state_dim is not None:
             data['states'] = self._pad_or_truncate_last_dim(
                 states, self.state_dim)
+            if state_chunks is not None:
+                data[self.state_chunk_key] = self._pad_or_truncate_last_dim(
+                    state_chunks, self.state_dim)
         if self.action_dim is not None and actions is not None:
             data['actions'] = self._pad_or_truncate_last_dim(
                 actions, self.action_dim)
@@ -587,6 +613,10 @@ class NormalizeStatesAndActions:
             if actions is not None:
                 data['actions'] = np.asarray(data['actions']).astype(
                     self.output_dtype, copy=False)
+            if state_chunks is not None:
+                data[self.state_chunk_key] = np.asarray(
+                    data[self.state_chunk_key]).astype(
+                        self.output_dtype, copy=False)
         if actions is not None and self.mark_all_action_steps_valid:
             action_masks = np.zeros(
                 np.asarray(data['actions']).shape, dtype=np.float32)
