@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 Loco-Mani task 2 with a state-action extended action.
-# The standalone dataset contains 296 episodes / 339,798 frames and has its
-# sole task remapped from source task_index=2 to task_index=0. Raw state/action
+# WAM on HUD04 Loco-Mani task 1 with a state-action extended action.
+# The standalone dataset contains 307 episodes / 189,027 frames and has its
+# sole task remapped from source task_index=1 to task_index=0. Raw state/action
 # dimensions are 33/43 (the final action dimension is ``done``); both are
 # padded to 64 for WAM.
 #
@@ -42,7 +42,7 @@ _text_cache_dir = os.path.abspath(
     ))
 
 _data_root = ('/mnt/data/cpfs/users/jikun/vcube_data/'
-              'wbt_done_dim_0609_0630_task2')
+              'wbt_done_dim_0609_0630_task1')
 _locomani_data_roots = [_data_root]
 _action_dim = 64
 _proprio_dim = 64
@@ -53,7 +53,7 @@ _state_chunk_source_key = 'observation.state'
 _action_window_start_idx = 0
 _frame_window_size = 9
 _frame_sample_stride = 4
-_statistic_name = 'hud04_locomani_task2'
+_statistic_name = 'hud04_locomani_task1'
 _mode_probs = dict(forward=1.0, idm=1.0, policy=1.0)
 seed = 42
 _prompt_template = (
@@ -291,11 +291,10 @@ inference = dict(
     task_suite_name=_statistic_name,
     task_descriptions={
         '1':
-        ('Turn right and walk to the table. Pick up the basket from the '
-         'floor with the right hand. Pick up the plush toys on the table '
-         'with the left hand, one by one, and place them into the basket. '
-         'After all plush toys are in the basket, place the basket on the '
-         'floor.'),
+        ('Turn around and move back to the first box. Bend down, grasp the '
+         'first box with both hands, and lift it. Carry the first box to the '
+         'second box located in front of you. Place the first box on top of '
+         'the second box.'),
     },
     seed=7,
     state_dim=_proprio_dim,

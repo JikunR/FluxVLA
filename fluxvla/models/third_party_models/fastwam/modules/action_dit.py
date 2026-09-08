@@ -84,8 +84,11 @@ class ActionDiT(nn.Module):
             raise ValueError(
                 f"`action_tokens` last dim must be {self.action_dim}, got {action_tokens.shape[2]}"
             )
-        if timestep.ndim != 1:
-            raise ValueError(f"`timestep` must be 1D [B] or [1], got shape {tuple(timestep.shape)}")
+        if timestep.ndim not in (1, 2):
+            raise ValueError(
+                "`timestep` must be [B], [1], or [B, T], got shape "
+                f"{tuple(timestep.shape)}"
+            )
         if context.ndim != 3:
             raise ValueError(
                 f"`context` must be 3D [B, L, D], got shape {tuple(context.shape)}"
@@ -96,11 +99,22 @@ class ActionDiT(nn.Module):
             raise ValueError(
                 f"Batch mismatch between action tokens and text context: {batch_size} vs {context.shape[0]}"
             )
+        seq_len = action_tokens.shape[1]
         if timestep.shape[0] not in (1, batch_size):
             raise ValueError(
                 f"`timestep` length must be 1 or batch_size({batch_size}), got {timestep.shape[0]}"
             )
+        if timestep.ndim == 2 and timestep.shape[1] != seq_len:
+            raise ValueError(
+                "Per-token `timestep` must match action token length; got "
+                f"{tuple(timestep.shape)} for T={seq_len}."
+            )
         if timestep.shape[0] == 1 and batch_size > 1:
+            if timestep.ndim == 2:
+                raise ValueError(
+                    "Per-token `timestep` batch dimension must match "
+                    f"batch_size({batch_size})."
+                )
             if self.training:
                 raise ValueError("During training, action timestep length must match batch_size.")
             timestep = timestep.expand(batch_size)
@@ -117,14 +131,20 @@ class ActionDiT(nn.Module):
                     f"`context_mask` shape must match `context` shape [B, L], got {tuple(context_mask.shape)} vs {tuple(context.shape)}"
                 )
 
-        seq_len = action_tokens.shape[1]
         if seq_len > self.freqs.shape[0]:
             raise ValueError(
                 f"Action token length {seq_len} exceeds RoPE cache {self.freqs.shape[0]}."
             )
 
-        t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
-        t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_dim))
+        if timestep.ndim == 2:
+            t = self.time_embedding(
+                sinusoidal_embedding_1d(self.freq_dim, timestep.flatten())
+            ).unflatten(0, (batch_size, seq_len))
+            t_mod = self.time_projection(t).unflatten(2, (6, self.hidden_dim))
+        else:
+            t = self.time_embedding(
+                sinusoidal_embedding_1d(self.freq_dim, timestep))
+            t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_dim))
 
         tokens = self.action_encoder(action_tokens)
         context_emb = self.text_embedding(context)

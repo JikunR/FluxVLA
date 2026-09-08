@@ -476,7 +476,10 @@ class WAMVLA(BaseVLA):
         seed: Optional[int] = None,
         rand_device: str = 'cpu',
         tiled: bool = False,
-        return_state_chunks: bool = False,
+        action_output_format: Optional[str] = None,
+        prev_actions: Optional[torch.Tensor] = None,
+        prefix_len: int = 0,
+        rtc_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> torch.Tensor:
         if 'prompt' in kwargs:
@@ -567,9 +570,12 @@ class WAMVLA(BaseVLA):
             sigma_shift=sigma_shift,
             seed=seed,
             rand_device=rand_device,
+            prev_actions=prev_actions,
+            prefix_len=prefix_len,
+            rtc_config=rtc_config,
         )
-        if return_state_chunks:
-            predict_kwargs['return_state_chunks'] = True
+        if action_output_format is not None:
+            predict_kwargs['action_output_format'] = action_output_format
         return self.vla_head.predict_action(**predict_kwargs)
 
     def _prepare_inference_context(

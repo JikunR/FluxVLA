@@ -47,6 +47,27 @@ model = dict(
     ))
 ```
 
+**WAM / WAMStateChunkHead** — add under `model.vla_head` just like GR00T.
+For concatenated state-action prediction, expose the prediction as an extended
+action to the existing Oli RTC runner. Controller actions are placed first so
+the normal action denormalizer truncates the auxiliary state dimensions only
+when producing robot commands:
+
+```python
+inference = dict(
+    type='OliRTCInferenceRunner',
+    execute_horizon=16,
+    async_remaining_actions_threshold=9,
+    rtc_config=dict(
+        enabled=True,
+        method='prefix',
+        prefix_len=7,
+    ))
+```
+
+Set `joint_state_action=True` and `action_output_format='extended_action'` on
+`WAMStateChunkHead` for this mode.
+
 Mechanism: for each batch element, sample a delay `d ∈ [0, max_delay)`. The first `d` action steps are set to clean time (known no-noise states) and masked out from the loss.
 
 Delay distribution notes:

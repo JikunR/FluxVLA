@@ -27,6 +27,12 @@ _ACTION_DECODER_BUILDERS = {
     'StateToActionDecoder': StateToActionDecoder,
 }
 
+_ACTION_OUTPUT_FORMATS = (
+    'action',
+    'action_state_tuple',
+    'extended_action',
+)
+
 
 @HEADS.register_module()
 class WAMStateChunkHead(WAMHead):
@@ -35,15 +41,15 @@ class WAMStateChunkHead(WAMHead):
     The inherited MoT branch still uses the parent's internal ``action`` slot,
     but semantically that slot is the state/action chunk expert in this head.
 
-    Two operating modes are supported:
+    Two state/action representations are supported:
 
     * ``joint_state_action=False`` (legacy): the MoT slot predicts state
       chunks only, and a small teacher-forced decoder then maps GT/predicted
       state chunks to action chunks.
     * ``joint_state_action=True``: the MoT slot predicts one concatenated
       ``[state_chunks | actions]`` chunk with a single diffusion expert, so
-      state and action are supervised jointly and the separate action decoder
-      is not used.
+      it is treated as one extended action. The separate action decoder is
+      not used.
     """
 
     def __init__(
@@ -52,6 +58,7 @@ class WAMStateChunkHead(WAMHead):
         action_decoder: Optional[Mapping[str, Any] | nn.Module] = None,
         action_dim: Optional[int] = None,
         joint_state_action: bool = False,
+        action_output_format: str = 'action',
         loss: Optional[Dict[str, Any]] = None,
         loss_lambda_state_to_action: float = 1.0,
         device: str = 'cpu',
@@ -70,14 +77,15 @@ class WAMStateChunkHead(WAMHead):
                          if joint_state_action else 'lambda_idm_state')
         policy_state_key = ('lambda_policy_state_action'
                             if joint_state_action else 'lambda_policy_state')
-        joint_state_key = ('lambda_joint_state_action'
-                           if joint_state_action else 'lambda_joint_state')
+        combined_mode_state_key = ('lambda_joint_state_action'
+                                   if joint_state_action else
+                                   'lambda_joint_state')
         loss_cfg.setdefault('lambda_idm_action',
                             loss_cfg.get(idm_state_key, 1.0))
         loss_cfg.setdefault('lambda_policy_action',
                             loss_cfg.get(policy_state_key, 1.0))
         loss_cfg.setdefault('lambda_joint_action',
-                            loss_cfg.get(joint_state_key, 1.0))
+                            loss_cfg.get(combined_mode_state_key, 1.0))
         self.loss_lambda_state_to_action = float(
             loss_cfg.get('lambda_state_to_action',
                          loss_lambda_state_to_action))
@@ -100,26 +108,43 @@ class WAMStateChunkHead(WAMHead):
         if self.action_decoder is not None:
             self.controller_action_dim = self.action_decoder.action_dim
         self.joint_state_action = joint_state_action
+        self.action_output_format = self._validate_action_output_format(
+            action_output_format)
         if self.joint_state_action:
             if self.action_decoder is not None:
                 raise ValueError(
                     '`joint_state_action` cannot be combined with an '
-                    '`action_decoder`; the joint MoT slot already predicts '
+                    '`action_decoder`; the MoT slot already predicts '
                     'state chunks and actions together.')
             if self.controller_action_dim is None:
                 raise ValueError(
-                    '`action_dim` is required for joint state-action '
+                    '`action_dim` is required for concatenated state-action '
                     'prediction.')
             self.state_chunk_dim = (
                 self.action_expert.action_dim - self.controller_action_dim)
             if self.state_chunk_dim <= 0:
                 raise ValueError(
-                    'Joint state-action `state_expert.action_dim` must be '
+                    'Extended-action `state_expert.action_dim` must be '
                     'larger than `action_dim`; got '
                     f'{self.action_expert.action_dim} vs '
                     f'{self.controller_action_dim}.')
         else:
             self.state_chunk_dim = self.action_expert.action_dim
+        if (self.action_output_format == 'extended_action'
+                and not self.joint_state_action):
+            raise ValueError("`action_output_format='extended_action'` "
+                             'requires `joint_state_action=True`.')
+
+    @staticmethod
+    def _validate_action_output_format(value: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError('`action_output_format` must be a string, got '
+                            f'{type(value).__name__}.')
+        if value not in _ACTION_OUTPUT_FORMATS:
+            raise ValueError(
+                f'Unsupported action_output_format {value!r}; expected one '
+                f'of {_ACTION_OUTPUT_FORMATS}.')
+        return value
 
     def _build_action_decoder(
         self,
@@ -282,7 +307,7 @@ class WAMStateChunkHead(WAMHead):
         if self.joint_state_action:
             if action_target is None:
                 raise ValueError(
-                    '`action` is required for joint state-action prediction.')
+                    '`action` is required for extended-action prediction.')
             action_target = self._to_model_dtype(action_target, device)
             action_target_is_pad = self._to_bool_mask(action_target_is_pad,
                                                       device)
@@ -313,7 +338,7 @@ class WAMStateChunkHead(WAMHead):
             ret, joint_state_action=self.joint_state_action)
 
         if self.action_decoder is None or action_target is None:
-            # Joint state-action prediction supervises actions inside the
+            # Extended-action prediction supervises controller actions in the
             # MoT slot, so there is no separate decoder loss to add.
             ret['loss_state_to_action'] = ret['loss'].detach().new_zeros(())
             return ret
@@ -351,14 +376,51 @@ class WAMStateChunkHead(WAMHead):
         *args,
         proprio: Optional[torch.Tensor] = None,
         embodiment_ids: Optional[torch.Tensor] = None,
-        return_state_chunks: bool = False,
+        action_output_format: Optional[str] = None,
+        prev_actions: Optional[torch.Tensor] = None,
+        prefix_len: int = 0,
+        rtc_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> torch.Tensor:
+        output_format = self._validate_action_output_format(
+            self.action_output_format
+            if action_output_format is None else action_output_format)
+        if output_format == 'extended_action' and not self.joint_state_action:
+            raise ValueError("`action_output_format='extended_action'` "
+                             'requires `joint_state_action=True`.')
         if self.joint_state_action:
-            pred_joint = super().predict_action(*args, **kwargs)
-            pred_state_chunks = pred_joint[..., :self.state_chunk_dim]
-            pred_actions = pred_joint[..., self.state_chunk_dim:]
-            if return_state_chunks:
+            prev_extended_action = prev_actions
+            if (prev_extended_action is not None
+                    and output_format == 'extended_action'):
+                if (prev_extended_action.shape[-1] !=
+                        self.action_expert.action_dim):
+                    raise ValueError(
+                        'RTC extended action prefix must contain controller '
+                        'actions followed by state chunks; got last dim '
+                        f'{prev_extended_action.shape[-1]}, expected '
+                        f'{self.action_expert.action_dim}.')
+                prev_controller = prev_extended_action[
+                    ..., :self.controller_action_dim]
+                prev_state = prev_extended_action[...,
+                                                  self.controller_action_dim:]
+                prev_extended_action = torch.cat([prev_state, prev_controller],
+                                                 dim=-1)
+            pred_extended_action = super().predict_action(
+                *args,
+                prev_actions=prev_extended_action,
+                prefix_len=prefix_len,
+                rtc_config=rtc_config,
+                **kwargs,
+            )
+            pred_state_chunks = pred_extended_action[
+                ..., :self.state_chunk_dim]
+            pred_actions = pred_extended_action[..., self.state_chunk_dim:]
+            if output_format == 'extended_action':
+                # Keep the full extended action in the RTC scheduler. The
+                # configured denormalizer truncates the controller prefix
+                # before commands are published to the robot.
+                return torch.cat([pred_actions, pred_state_chunks], dim=-1)
+            if output_format == 'action_state_tuple':
                 return pred_actions, pred_state_chunks
             return pred_actions
         pred_state_chunks = self.predict_state_chunk(*args, **kwargs)
@@ -380,6 +442,6 @@ class WAMStateChunkHead(WAMHead):
             state_chunks=pred_state_chunks,
             embodiment_ids=embodiment_ids,
         )
-        if return_state_chunks:
+        if output_format == 'action_state_tuple':
             return pred_actions, pred_state_chunks
         return pred_actions

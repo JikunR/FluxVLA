@@ -300,7 +300,8 @@ def predict_policy_outputs(model, inputs: Dict, args, condition: Dict,
         num_inference_steps=args.num_inference_steps,
         seed=seed,
         rand_device='cpu',
-        return_state_chunks=uses_state_chunk_stream(model),
+        action_output_format=('action_state_tuple'
+                              if uses_state_chunk_stream(model) else 'action'),
         **condition,
     )
     if uses_state_chunk_stream(model):
