@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 Loco-Mani task 2 with a state-action extended action.
-# The standalone dataset contains 296 episodes / 339,798 frames and has its
-# sole task remapped from source task_index=2 to task_index=0. Raw state/action
-# dimensions are 33/43 (the final action dimension is ``done``); both are
-# padded to 64 for WAM.
+# WAM on HUD04 Loco-Mani plush-to-chair and box-stacking tasks with VGM and
+# policy prediction.
+# The standalone dataset contains 404 episodes / 229,641 frames across two
+# tasks: moving the plush toy to the chair (213 episodes) and stacking the
+# first white box on the second (191 episodes). Raw state/action dimensions
+# are 33/43 (the final action dimension is ``done``); both are padded to 64.
 #
 # Precompute the Wan/T5 text embedding cache before training:
 #   python tools/wam/precompute_text_embeds.py \
@@ -42,19 +43,21 @@ _text_cache_dir = os.path.abspath(
     ))
 
 _data_root = ('/mnt/data/cpfs/users/jikun/vcube_data/'
-              'wbt_done_dim_0609_0630_task2')
+              'wbt_done_dim_0508_0518_plush_box')
 _locomani_data_roots = [_data_root]
 _action_dim = 64
 _proprio_dim = 64
 _action_horizon = 32
-_extended_action_dim = _proprio_dim + _action_dim
-_action_source_key = 'action'
-_state_chunk_source_key = 'observation.state'
-_action_window_start_idx = 0
 _frame_window_size = 9
 _frame_sample_stride = 4
-_statistic_name = 'hud04_locomani_task2'
-_mode_probs = dict(forward=1.0, idm=1.0, policy=1.0)
+_statistic_name = 'hud04_locomani_plush_box'
+_mode_probs = dict(
+    forward=0.0,
+    idm=0.0,
+    policy=0.0,
+    joint=0.0,
+    vgm_policy=1.0,
+)
 seed = 42
 _prompt_template = (
     "A video recorded from a robot's point of view executing the following "
@@ -72,8 +75,6 @@ def _vcube_pipeline(embodiment_id: int):
                 'info',
                 'stats',
                 'action_masks',
-                'state_chunks',
-                'state_chunk_masks',
             ],
             video_keys=[
                 'observation.images.head',
@@ -82,8 +83,6 @@ def _vcube_pipeline(embodiment_id: int):
             name_mappings={
                 'observation.state': ['states'],
                 'actions': ['actions'],
-                'state_chunks': ['state_chunks'],
-                'state_chunk_masks': ['state_chunk_masks'],
             },
             embodiment_id=embodiment_id,
         ),
@@ -105,7 +104,6 @@ def _vcube_pipeline(embodiment_id: int):
             state_key='proprio',
             action_key='action',
             norm_type='mean_std',
-            state_chunk_key='state_chunks',
         ),
         dict(
             type='PrepareVideo',
@@ -129,13 +127,12 @@ def _vcube_dataset(data_roots, embodiment_id: int):
         data_root_path=data_roots,
         transforms=_vcube_pipeline(embodiment_id),
         action_window_size=_action_horizon,
-        action_key=_action_source_key,
+        action_key='action',
         use_delta=False,
         statistic_name=_statistic_name,
-        window_start_idx=_action_window_start_idx,
+        window_start_idx=0,
         frame_window_size=_frame_window_size,
         frame_sample_stride=_frame_sample_stride,
-        state_chunk_key=_state_chunk_source_key,
     )
 
 
@@ -154,10 +151,7 @@ model = dict(
         checkpoint_root=_wan_checkpoint_root,
     ),
     vla_head=dict(
-        type='WAMStateChunkHead',
-        action_dim=_action_dim,
-        joint_state_action=True,
-        action_output_format='extended_action',
+        type='WAMHead',
         video_expert=dict(
             type='WanVideoDiT',
             checkpoint_root=_wan_checkpoint_root,
@@ -181,19 +175,17 @@ model = dict(
                 fuse_vae_embedding_in_latents=True,
                 video_attention_mask_mode='first_frame_causal',
                 action_conditioned=False,
-                action_dim=_proprio_dim,
+                action_dim=_action_dim,
                 action_group_causal_mask_mode='group_diagonal',
                 use_gradient_checkpointing=True,
             ),
         ),
-        state_expert=dict(
+        action_expert=dict(
             type='ActionDiT',
             pretrained_path=_action_dit,
             skip_load_from_pretrain=False,
             config=dict(
-                # One extended [state | action] vector is denoised by the
-                # state expert; only the controller-action slice is published.
-                action_dim=_extended_action_dim,
+                action_dim=_action_dim,
                 hidden_dim=1024,
                 ffn_dim=4096,
                 num_heads=24,
@@ -218,9 +210,10 @@ model = dict(
             lambda_video=0.0,
             lambda_action=0.0,
             lambda_forward_video=1.0,
-            lambda_idm_state_action=1.0,
-            lambda_policy_state_action=1.0,
-            lambda_state_to_action=0.0,
+            lambda_idm_action=0.0,
+            lambda_policy_action=1.0,
+            lambda_joint_video=0.0,
+            lambda_joint_action=0.0,
         ),
         video_cond_noise_prob=0.5,
     ),
@@ -255,7 +248,7 @@ runner = dict(
     max_grad_norm=1.0,
     collator=dict(
         type='WAMModeCollator',
-        mode='batch',
+        mode='vgm_policy',
         mode_probs=_mode_probs,
         keys=[
             'states',
@@ -263,8 +256,6 @@ runner = dict(
             'img_masks',
             'actions',
             'action_masks',
-            'state_chunks',
-            'state_chunk_masks',
             'embodiment_ids',
             'frame_masks',
             'context',
@@ -291,11 +282,14 @@ inference = dict(
     task_suite_name=_statistic_name,
     task_descriptions={
         '1':
-        ('Turn right and walk to the table. Pick up the basket from the '
-         'floor with the right hand. Pick up the plush toys on the table '
-         'with the left hand, one by one, and place them into the basket. '
-         'After all plush toys are in the basket, place the basket on the '
-         'floor.'),
+        ('Navigate forward to the first white box. Grasp the blue plush toy '
+         'from the first white box. Turn around and move to the chair. '
+         'Release the blue plush toy onto the chair.'),
+        '2':
+        ('Turn around and move back to the first white box. Bend down, grasp '
+         'the first white box with both hands, and lift it. Carry the first '
+         'white box to the second white box located in front of you. Place '
+         'the first white box on top of the second white box.'),
     },
     seed=7,
     state_dim=_proprio_dim,

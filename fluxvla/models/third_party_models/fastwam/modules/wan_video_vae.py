@@ -951,8 +951,13 @@ class WanVideoVAE38(_WanVideoVAEBase):
             0.5709, 0.6065, 0.6415, 0.4944, 0.5726, 1.2042, 0.5458, 1.6887,
             0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744
         ]
-        self.mean = torch.tensor(mean)
-        self.std = torch.tensor(std)
+        # These normalization constants are intentionally plain tensors rather
+        # than state-dict entries.  Keep their storage real when the module is
+        # constructed inside a ``torch.device('meta')`` context for low-memory
+        # safetensors loading; checkpoint assignment only materializes
+        # parameters and persistent buffers.
+        self.mean = torch.tensor(mean, device='cpu')
+        self.std = torch.tensor(std, device='cpu')
         self.scale = [self.mean, 1.0 / self.std]
 
         # init model

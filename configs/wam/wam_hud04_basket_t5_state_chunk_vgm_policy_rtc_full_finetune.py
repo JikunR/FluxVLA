@@ -12,15 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 Loco-Mani task 2 with a state-action extended action.
-# The standalone dataset contains 296 episodes / 339,798 frames and has its
-# sole task remapped from source task_index=2 to task_index=0. Raw state/action
-# dimensions are 33/43 (the final action dimension is ``done``); both are
-# padded to 64 for WAM.
-#
-# Precompute the Wan/T5 text embedding cache before training:
-#   python tools/wam/precompute_text_embeds.py \
-#       --dataset-dir <data_root> --cache-dir <WAM_TEXT_CACHE_DIR>
+# WAM on HUD04 / VCube basket data with state-action chunk prediction.
+# One MoT forward jointly trains video generation (VGM/forward_video) and a
+# diffusion expert that predicts concatenated ``[state_chunks | actions]``
+# chunks via the FastWAM-style ``vgm_policy`` mode.
+# This variant enables training-time and inference-time RTC.
 
 import os
 
@@ -41,9 +37,13 @@ _text_cache_dir = os.path.abspath(
         os.path.join(_ckpt_root, 'hud04', 'text_embeds_cache'),
     ))
 
-_data_root = ('/mnt/data/cpfs/users/jikun/vcube_data/'
-              'wbt_done_dim_0609_0630_task2')
-_locomani_data_roots = [_data_root]
+_data_root = '/mnt/data/cpfs/users/jikun/vcube_data'
+_basket_data_roots = [
+    os.path.join(
+        _data_root,
+        '0518_21_22_25_26_27_0601_02_03_04_05_09_10_11_12_15_16_17_18_22_23_basket_full_task_prompt_delta_base_filtered_V2.1',  # noqa: E501
+    )
+]
 _action_dim = 64
 _proprio_dim = 64
 _action_horizon = 32
@@ -53,8 +53,14 @@ _state_chunk_source_key = 'observation.state'
 _action_window_start_idx = 0
 _frame_window_size = 9
 _frame_sample_stride = 4
-_statistic_name = 'hud04_locomani_task2'
-_mode_probs = dict(forward=1.0, idm=1.0, policy=1.0)
+_statistic_name = 'hud04_vcube'
+_mode_probs = dict(
+    forward=0.0,
+    idm=0.0,
+    policy=0.0,
+    joint=0.0,
+    vgm_policy=1.0,
+)
 seed = 42
 _prompt_template = (
     "A video recorded from a robot's point of view executing the following "
@@ -191,8 +197,9 @@ model = dict(
             pretrained_path=_action_dit,
             skip_load_from_pretrain=False,
             config=dict(
-                # One extended [state | action] vector is denoised by the
-                # state expert; only the controller-action slice is published.
+                # One extended [state | action] vector is denoised by the state
+                # expert; the head splits the predicted vector back into state
+                # and action slices.
                 action_dim=_extended_action_dim,
                 hidden_dim=1024,
                 ffn_dim=4096,
@@ -218,8 +225,10 @@ model = dict(
             lambda_video=0.0,
             lambda_action=0.0,
             lambda_forward_video=1.0,
-            lambda_idm_state_action=1.0,
+            lambda_idm_state_action=0.0,
             lambda_policy_state_action=1.0,
+            lambda_joint_video=0.0,
+            lambda_joint_state_action=0.0,
             lambda_state_to_action=0.0,
         ),
         video_cond_noise_prob=0.5,
@@ -239,13 +248,13 @@ train_dataloader = dict(
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
         statistic_name=_statistic_name,
-        datasets=_vcube_dataset(_locomani_data_roots, embodiment_id=0),
+        datasets=_vcube_dataset(_basket_data_roots, embodiment_id=0),
     ),
 )
 
 runner = dict(
     type='DDPTrainRunner',
-    max_epochs=10,
+    max_epochs=6,
     optimizer=dict(
         lr=1e-4,
         type='AdamW',
@@ -255,7 +264,7 @@ runner = dict(
     max_grad_norm=1.0,
     collator=dict(
         type='WAMModeCollator',
-        mode='batch',
+        mode='vgm_policy',
         mode_probs=_mode_probs,
         keys=[
             'states',
@@ -290,12 +299,9 @@ inference = dict(
     type='OliRTCInferenceRunner',
     task_suite_name=_statistic_name,
     task_descriptions={
-        '1':
-        ('Turn right and walk to the table. Pick up the basket from the '
-         'floor with the right hand. Pick up the plush toys on the table '
-         'with the left hand, one by one, and place them into the basket. '
-         'After all plush toys are in the basket, place the basket on the '
-         'floor.'),
+        '1': ('Lift up the red basket with right arm, put all the objects on '
+              'the white table into the red basket with left arm, place the '
+              'red basket on the table.'),
     },
     seed=7,
     state_dim=_proprio_dim,
@@ -355,7 +361,7 @@ inference = dict(
         type='DenormalizePrivateAction',
         statistic_name=_statistic_name,
         norm_type='mean_std',
-        action_dim=43,
+        action_dim=42,
     ),
     operator=dict(
         type='OliOperator',

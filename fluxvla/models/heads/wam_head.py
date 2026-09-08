@@ -82,6 +82,7 @@ class WAMHead(nn.Module):
         video_cond_noise_prob: float = 0.5,
         mode_probs: Optional[Dict[str, float]] = None,
         sample_mode_in_forward: bool = False,
+        rtc_training_config: Optional[Dict[str, Any]] = None,
         device: str = 'cpu',
         torch_dtype: torch.dtype = torch.float32,
         *args,
@@ -199,6 +200,8 @@ class WAMHead(nn.Module):
         self.video_cond_noise_prob = float(video_cond_noise_prob)
         self.mode_probs = normalize_wam_mode_probs(mode_probs)
         self.sample_mode_in_forward = bool(sample_mode_in_forward)
+        self.rtc_training_config = (None if rtc_training_config is None else
+                                    dict(rtc_training_config))
 
     @staticmethod
     def _extract_expert_config(component, component_path: str):
@@ -544,6 +547,9 @@ class WAMHead(nn.Module):
         sigma_shift: Optional[float] = None,
         seed: Optional[int] = None,
         rand_device: str = 'cpu',
+        prev_actions: Optional[torch.Tensor] = None,
+        prefix_len: int = 0,
+        rtc_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> torch.Tensor:
         self.eval()
@@ -563,6 +569,28 @@ class WAMHead(nn.Module):
             dtype=torch.float32,
         ).to(
             device=device, dtype=self.torch_dtype)
+
+        use_rtc_prefix = bool(prev_actions is not None and prefix_len > 0
+                              and rtc_config
+                              and rtc_config.get('enabled', False))
+        if use_rtc_prefix:
+            method = rtc_config.get('method', 'prefix')
+            if method != 'prefix':
+                raise ValueError(
+                    f'WAM inference supports RTC prefix mode, got {method!r}.')
+            if prev_actions.ndim == 2:
+                prev_actions = prev_actions.unsqueeze(0)
+            if (prev_actions.ndim != 3
+                    or prev_actions.shape[0] != latents_action.shape[0]
+                    or prev_actions.shape[2] != latents_action.shape[2]):
+                raise ValueError(
+                    '`prev_actions` has an incompatible shape; got '
+                    f'{tuple(prev_actions.shape)} for latent shape '
+                    f'{tuple(latents_action.shape)}.')
+            prefix_len = min(
+                int(prefix_len), action_horizon, prev_actions.shape[1])
+            prev_actions = prev_actions.to(
+                device=device, dtype=self.torch_dtype)
 
         fuse_flag = bool(
             getattr(self.video_expert, 'fuse_vae_embedding_in_latents', False))
@@ -610,6 +638,12 @@ class WAMHead(nn.Module):
         for step_t_action, step_delta_action in schedule:
             timestep_action = step_t_action.unsqueeze(0).to(
                 dtype=latents_action.dtype, device=device)
+            if use_rtc_prefix:
+                latents_action[:, :prefix_len] = \
+                    prev_actions[:, :prefix_len]
+                timestep_action = timestep_action[:, None].expand(
+                    -1, action_horizon).clone()
+                timestep_action[:, :prefix_len] = 0.0
             pred_action = self._predict_action_noise_with_cache(
                 latents_action=latents_action,
                 timestep_action=timestep_action,
@@ -620,6 +654,9 @@ class WAMHead(nn.Module):
             )
             latents_action = self.infer_action_scheduler.step(
                 pred_action, step_delta_action, latents_action)
+
+        if use_rtc_prefix:
+            latents_action[:, :prefix_len] = prev_actions[:, :prefix_len]
 
         return latents_action
 
@@ -930,6 +967,44 @@ class WAMHead(nn.Module):
             return (action_loss_token * valid).sum(dim=1) / valid_sum
         return action_loss_token.mean(dim=1)
 
+    def _prepare_noisy_action(
+        self,
+        action: torch.Tensor,
+        action_noise: torch.Tensor,
+        sampled_timestep: torch.Tensor,
+        action_is_pad: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Apply ordinary or RTC flow noise and return the effective mask."""
+        if not (self.rtc_training_config
+                and self.rtc_training_config.get('enabled', False)):
+            noisy_action = self.train_action_scheduler.add_noise(
+                action, action_noise, sampled_timestep)
+            return noisy_action, sampled_timestep, action_is_pad
+
+        from fluxvla.engines.utils.rtc_training import (
+            apply_rtc_time_conditioning, sample_training_delay)
+        delays = sample_training_delay(
+            batch_size=action.shape[0],
+            max_delay=self.rtc_training_config.get('max_delay', 5),
+            distribution=self.rtc_training_config.get('distribution',
+                                                      'exponential'),
+            temperature=self.rtc_training_config.get('temperature', 1.0),
+            device=action.device,
+        )
+        valid_action_mask = (None if action_is_pad is None else ~action_is_pad)
+        timestep, valid_action_mask = apply_rtc_time_conditioning(
+            sampled_timestep,
+            valid_action_mask,
+            delays,
+            action.shape[1],
+            clean_time=0.0,
+        )
+        sigma = timestep.to(action.dtype) / float(
+            self.train_action_scheduler.num_train_timesteps)
+        noisy_action = ((1.0 - sigma.unsqueeze(-1)) * action +
+                        sigma.unsqueeze(-1) * action_noise)
+        return noisy_action, timestep, ~valid_action_mask.bool()
+
     def _sample_training_mode_ids(
         self,
         batch_size: int,
@@ -1060,17 +1135,29 @@ class WAMHead(nn.Module):
                 device=device,
                 dtype=action.dtype,
             )
-        noisy_action = self.train_action_scheduler.add_noise(
-            action, action_noise, sampled_timestep_action)
         target_action = self.train_action_scheduler.training_target(
             action, action_noise, sampled_timestep_action)
         zero_timestep_action = torch.zeros((batch_size_int, ),
                                            dtype=action.dtype,
                                            device=device)
+        noisy_action, rtc_timestep_action, action_loss_is_pad = \
+            self._prepare_noisy_action(
+                action=action,
+                action_noise=action_noise,
+                sampled_timestep=sampled_timestep_action,
+                action_is_pad=inputs['action_is_pad'],
+            )
         latents_action = torch.where(
             is_forward.view(batch_size_int, 1, 1), action, noisy_action)
-        timestep_action = torch.where(is_forward, zero_timestep_action,
-                                      sampled_timestep_action)
+        if rtc_timestep_action.ndim == 2:
+            timestep_action = torch.where(
+                is_forward.view(batch_size_int, 1),
+                zero_timestep_action.view(batch_size_int, 1),
+                rtc_timestep_action,
+            )
+        else:
+            timestep_action = torch.where(is_forward, zero_timestep_action,
+                                          rtc_timestep_action)
 
         video_pre = self.video_expert.pre_dit(
             x=latents_video,
@@ -1145,7 +1232,7 @@ class WAMHead(nn.Module):
         action_loss_per_sample = self._compute_action_loss_per_sample(
             pred_action=pred_action,
             target_action=target_action,
-            action_is_pad=inputs['action_is_pad'],
+            action_is_pad=action_loss_is_pad,
         )
         action_weight = self.train_action_scheduler.training_weight(
             sampled_timestep_action).to(

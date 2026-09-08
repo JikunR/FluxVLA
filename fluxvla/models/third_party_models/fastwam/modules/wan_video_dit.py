@@ -206,10 +206,12 @@ def precompute_freqs_cis_3d(dim: int, end: int = 1024, theta: float = 10000.0):
 
 
 def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
-    # 1d rope precompute
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)
+    # RoPE frequencies are runtime constants rather than state-dict entries.
+    # Keep real CPU storage even when model construction runs in a global
+    # ``torch.device('meta')`` context for low-memory checkpoint loading.
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device='cpu')
                    [: (dim // 2)].double() / dim))
-    freqs = torch.outer(torch.arange(end, device=freqs.device), freqs)
+    freqs = torch.outer(torch.arange(end, device='cpu'), freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
