@@ -69,6 +69,7 @@ class WAMVLA(BaseVLA):
         vla_head: Optional[Dict] = None,
         proprio_dim: Optional[int] = None,
         action_horizon: Optional[int] = None,
+        num_inference_steps: int = 20,
         frame_window_size: Optional[int] = None,
         num_views: Optional[int] = None,
         mot_checkpoint_mixed_attn: bool = True,
@@ -132,6 +133,9 @@ class WAMVLA(BaseVLA):
         )
         self.proprio_dim = proprio_dim_value
         self.action_horizon = action_horizon_value
+        self.num_inference_steps = int(num_inference_steps)
+        if self.num_inference_steps <= 0:
+            raise ValueError('`num_inference_steps` must be positive.')
         self.num_views = num_views_value
         self.frame_window_size = frame_window_size_value
         self.video_latent_codec = video_latent_codec_module
@@ -471,12 +475,15 @@ class WAMVLA(BaseVLA):
         lang_masks: Optional[torch.Tensor] = None,
         states: Optional[torch.Tensor] = None,
         embodiment_ids: Optional[torch.Tensor] = None,
-        num_inference_steps: int = 20,
+        num_inference_steps: Optional[int] = None,
         sigma_shift: Optional[float] = None,
         seed: Optional[int] = None,
         rand_device: str = 'cpu',
         tiled: bool = False,
-        return_state_chunks: bool = False,
+        action_output_format: Optional[str] = None,
+        prev_actions: Optional[torch.Tensor] = None,
+        prefix_len: int = 0,
+        rtc_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> torch.Tensor:
         if 'prompt' in kwargs:
@@ -508,6 +515,8 @@ class WAMVLA(BaseVLA):
             )
         if action_horizon is None:
             action_horizon = self.action_horizon
+        if num_inference_steps is None:
+            num_inference_steps = self.num_inference_steps
         if action_horizon is None:
             raise ValueError(
                 '`action_horizon` must be provided or configured on the '
@@ -567,9 +576,12 @@ class WAMVLA(BaseVLA):
             sigma_shift=sigma_shift,
             seed=seed,
             rand_device=rand_device,
+            prev_actions=prev_actions,
+            prefix_len=prefix_len,
+            rtc_config=rtc_config,
         )
-        if return_state_chunks:
-            predict_kwargs['return_state_chunks'] = True
+        if action_output_format is not None:
+            predict_kwargs['action_output_format'] = action_output_format
         return self.vla_head.predict_action(**predict_kwargs)
 
     def _prepare_inference_context(
@@ -626,7 +638,7 @@ class WAMVLA(BaseVLA):
         context_mask: Optional[torch.Tensor] = None,
         lang_tokens: Optional[torch.Tensor] = None,
         lang_masks: Optional[torch.Tensor] = None,
-        num_inference_steps: int = 20,
+        num_inference_steps: Optional[int] = None,
         sigma_shift: Optional[float] = None,
         seed: Optional[int] = None,
         rand_device: str = 'cpu',
@@ -635,6 +647,8 @@ class WAMVLA(BaseVLA):
         self.eval()
         if action_horizon is None:
             action_horizon = self.action_horizon
+        if num_inference_steps is None:
+            num_inference_steps = self.num_inference_steps
         if action_horizon is None:
             raise ValueError(
                 '`action_horizon` must be provided or configured on the '

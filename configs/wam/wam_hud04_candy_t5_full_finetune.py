@@ -334,7 +334,7 @@ _prepare_pose = [
     -0.0991593,
     -0.592179,
     -0.182942,
-] + [0.0] * 12
+] + [0.0, 0.0, 100.0, 100.0] + [0.0] * 8
 
 inference = dict(
     type='OliInferenceRunner',

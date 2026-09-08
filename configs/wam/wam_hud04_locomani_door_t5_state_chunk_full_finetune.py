@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 Loco-Mani task 2 with a state-action extended action.
-# The standalone dataset contains 296 episodes / 339,798 frames and has its
-# sole task remapped from source task_index=2 to task_index=0. Raw state/action
-# dimensions are 33/43 (the final action dimension is ``done``); both are
-# padded to 64 for WAM.
+# WAM on the HUD04 Loco-Mani door-opening task with a state-action
+# extended action. The two datasets contain 166 episodes / 94,717 frames.
+# Raw state/action dimensions are 33/42; both are padded to 64 for WAM.
 #
 # Precompute the Wan/T5 text embedding cache before training:
 #   python tools/wam/precompute_text_embeds.py \
@@ -41,9 +39,11 @@ _text_cache_dir = os.path.abspath(
         os.path.join(_ckpt_root, 'hud04', 'text_embeds_cache'),
     ))
 
-_data_root = ('/mnt/data/cpfs/users/jikun/vcube_data/'
-              'wbt_done_dim_0609_0630_task2')
-_locomani_data_roots = [_data_root]
+_data_root = '/mnt/data/cpfs/limx_embmc/VLA_Data/Loco-Mani/processed'
+_locomani_data_roots = [
+    os.path.join(_data_root, '0721_door_v21'),
+    os.path.join(_data_root, '0722_door_v21'),
+]
 _action_dim = 64
 _proprio_dim = 64
 _action_horizon = 32
@@ -53,7 +53,7 @@ _state_chunk_source_key = 'observation.state'
 _action_window_start_idx = 0
 _frame_window_size = 9
 _frame_sample_stride = 4
-_statistic_name = 'hud04_locomani_task2'
+_statistic_name = 'hud04_locomani_door'
 _mode_probs = dict(forward=1.0, idm=1.0, policy=1.0)
 seed = 42
 _prompt_template = (
@@ -77,7 +77,7 @@ def _vcube_pipeline(embodiment_id: int):
             ],
             video_keys=[
                 'observation.images.head',
-                'observation.images.left_wrist',
+                'observation.images.right_wrist',
             ],
             name_mappings={
                 'observation.state': ['states'],
@@ -245,7 +245,7 @@ train_dataloader = dict(
 
 runner = dict(
     type='DDPTrainRunner',
-    max_epochs=10,
+    max_epochs=30,
     optimizer=dict(
         lr=1e-4,
         type='AdamW',
@@ -291,11 +291,10 @@ inference = dict(
     task_suite_name=_statistic_name,
     task_descriptions={
         '1':
-        ('Turn right and walk to the table. Pick up the basket from the '
-         'floor with the right hand. Pick up the plush toys on the table '
-         'with the left hand, one by one, and place them into the basket. '
-         'After all plush toys are in the basket, place the basket on the '
-         'floor.'),
+        ('Walk towards the white door, use the right hand to grasp the door '
+         'handle, rotate the handle to open the door, use the left hand to '
+         'further push the opened door, and finally stop at the side of the '
+         'door.'),
     },
     seed=7,
     state_dim=_proprio_dim,
@@ -314,12 +313,12 @@ inference = dict(
     default_execution_count=1000,
     mixed_precision_dtype='bf16',
     low_cpu_mem_usage=True,
-    camera_names=['head', 'left_wrist'],
+    camera_names=['head', 'right_wrist'],
     dataset=dict(
         type='PrivateInferenceDataset',
         statistic_name=_statistic_name,
         embodiment_id=0,
-        img_keys=['head', 'left_wrist'],
+        img_keys=['head', 'right_wrist'],
         transforms=[
             dict(type='ResizeImages', height=240, width=320),
             dict(
@@ -355,13 +354,14 @@ inference = dict(
         type='DenormalizePrivateAction',
         statistic_name=_statistic_name,
         norm_type='mean_std',
-        action_dim=43,
+        action_dim=42,
     ),
     operator=dict(
         type='OliOperator',
         control_backend='mros',
         head_rgb_topic='/head/color/image_raw/compressed',
-        left_wrist_rgb_topic=('/left_wrist_camera/color/image_raw/compressed'),
+        left_wrist_rgb_topic=(
+            '/right_wrist_camera/color/image_raw/compressed'),
         joint_state_topic='/joint/state',
         finger_state_topic='/brainco1/hand/state',
         finger_cmd_topic='/brainco1/hand/cmd',
