@@ -16,6 +16,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -27,6 +28,8 @@ from fluxvla.engines import HEADS
 from fluxvla.models.backbones.vlms.wan22_text_backbone import Wan22TextBackbone
 from fluxvla.models.heads.wam_head import WAMHead
 from fluxvla.models.heads.wam_state_chunk_head import WAMStateChunkHead
+from fluxvla.models.third_party_models.fastwam.modules.action_dit import \
+    ActionDiT
 from fluxvla.models.third_party_models.fastwam.modules.mot import MoT
 from fluxvla.models.vlas.wam_vla import WAMVLA
 from fluxvla.transforms.transform_prompts import LoadCachedTextEmbedding
@@ -180,6 +183,111 @@ class WAMHeadTest(unittest.TestCase):
 
     def test_registry(self):
         self.assertIs(HEADS.get('WAMHead'), WAMHead)
+
+    def test_action_dit_accepts_per_token_timesteps(self):
+        expert = ActionDiT(
+            hidden_dim=8,
+            action_dim=3,
+            ffn_dim=16,
+            text_dim=6,
+            freq_dim=4,
+            eps=1e-6,
+            num_heads=2,
+            attn_head_dim=4,
+            num_layers=0,
+        )
+        pre = expert.pre_dit(
+            action_tokens=torch.randn(2, 5, 3),
+            timestep=torch.arange(10, dtype=torch.float32).view(2, 5),
+            context=torch.randn(2, 4, 6),
+        )
+        self.assertEqual(pre['t'].shape, (2, 5, 8))
+        self.assertEqual(pre['t_mod'].shape, (2, 5, 6, 8))
+
+    @mock.patch(
+        'fluxvla.engines.utils.rtc_training.sample_training_delay',
+        return_value=torch.tensor([2, 1]),
+    )
+    def test_rtc_action_prefix_is_clean_and_excluded_from_loss(
+            self, _sample_delay):
+        head = _make_head(
+            rtc_training_config=dict(
+                enabled=True,
+                max_delay=7,
+                distribution='exponential',
+                temperature=1.0,
+            ))
+        action = torch.arange(24, dtype=torch.float32).view(2, 4, 3)
+        noise = torch.full_like(action, 100.0)
+        timestep = torch.tensor([500.0, 250.0])
+        action_is_pad = torch.tensor([
+            [False, False, False, True],
+            [False, False, True, True],
+        ])
+
+        noisy, per_token_t, effective_is_pad = head._prepare_noisy_action(
+            action, noise, timestep, action_is_pad)
+
+        self.assertTrue(torch.equal(noisy[0, :2], action[0, :2]))
+        self.assertTrue(torch.equal(noisy[1, :1], action[1, :1]))
+        self.assertEqual(per_token_t.tolist(), [
+            [0.0, 0.0, 500.0, 500.0],
+            [0.0, 250.0, 250.0, 250.0],
+        ])
+        self.assertEqual(effective_is_pad.tolist(), [
+            [True, True, False, True],
+            [True, False, True, True],
+        ])
+
+    def test_rtc_inference_locks_prefix_and_uses_per_token_time(self):
+        head = _make_head()
+        head.video_expert.video_attention_mask_mode = 'first_frame_causal'
+        head.video_expert.fuse_vae_embedding_in_latents = False
+        seen_timesteps = []
+
+        def fake_predict_noise(**kwargs):
+            seen_timesteps.append(kwargs['timestep_action'].clone())
+            return torch.zeros_like(kwargs['latents_action'])
+
+        video_pre = {
+            'tokens': torch.zeros(1, 2, 8),
+            'freqs': torch.zeros(2, 1, 2),
+            't_mod': torch.zeros(1, 6, 8),
+            'context': torch.zeros(1, 3, 8),
+            'context_mask': torch.ones(1, 2, 3, dtype=torch.bool),
+            'meta': {
+                'tokens_per_frame': 2,
+            },
+        }
+        prev = torch.full((1, 2, 7), 3.0)
+        with mock.patch.object(
+                head.video_expert, 'pre_dit', return_value=video_pre,
+                create=True), mock.patch.object(
+                    head, '_build_mot_attention_mask',
+                    return_value=torch.ones(6, 6, dtype=torch.bool)), \
+                mock.patch.object(
+                    head.mot, 'prefill_video_cache',
+                    return_value=[{'k': torch.zeros(1, 2, 1)}],
+                    create=True), mock.patch.object(
+                        head, '_predict_action_noise_with_cache',
+                        side_effect=fake_predict_noise):
+            pred = head.predict_action(
+                first_frame_latents=torch.zeros(1, 1, 1, 1, 1),
+                context=torch.zeros(1, 3, 8),
+                context_mask=torch.ones(1, 3, dtype=torch.bool),
+                action_horizon=4,
+                num_inference_steps=2,
+                prev_actions=prev,
+                prefix_len=2,
+                rtc_config=dict(enabled=True, method='prefix'),
+            )
+
+        self.assertEqual(len(seen_timesteps), 2)
+        for timestep in seen_timesteps:
+            self.assertEqual(tuple(timestep.shape), (1, 4))
+            self.assertEqual(timestep[0, :2].tolist(), [0.0, 0.0])
+            self.assertTrue((timestep[0, 2:] > 0).all())
+        torch.testing.assert_close(pred[:, :2], prev)
 
     def test_wam_mode_ids_are_shared(self):
         self.assertEqual(WAM_TRAINING_MODES,
@@ -493,6 +601,32 @@ class WAMVLATest(unittest.TestCase):
 
 class WAMConfigTest(unittest.TestCase):
 
+    def test_locomani_task2_enables_training_time_rtc(self):
+        path = ('configs/wam/'
+                'wam_hud04_locomani_task2_t5_state_chunk_full_finetune.py')
+        cfg = Config.fromfile(path)
+        self.assertNotIn('_base_', Path(path).read_text())
+        self.assertEqual(cfg.runner.max_epochs, 10)
+        self.assertTrue(cfg.model.vla_head.joint_state_action)
+        self.assertEqual(cfg.model.vla_head.action_output_format,
+                         'extended_action')
+        self.assertEqual(
+            dict(cfg.model.vla_head.rtc_training_config), {
+                'enabled': True,
+                'max_delay': 16,
+                'distribution': 'exponential',
+                'temperature': 3.0,
+            })
+        self.assertEqual(cfg.inference.type, 'OliRTCInferenceRunner')
+        self.assertEqual(cfg.inference.execute_horizon, 32)
+        self.assertEqual(cfg.inference.async_remaining_actions_threshold, 17)
+        self.assertEqual(
+            dict(cfg.inference.rtc_config), {
+                'enabled': True,
+                'method': 'prefix',
+                'prefix_len': 15,
+            })
+
     def test_canonical_configs_are_wam_only(self):
         for path, suite in (
             ('configs/wam/wam_libero_object_full_finetune.py',
@@ -592,7 +726,7 @@ class WAMConfigTest(unittest.TestCase):
         self.assertNotIn('Wan22TextBackbone', config_text)
 
 
-class _FakeJointExpert(nn.Module):
+class _FakeExtendedActionExpert(nn.Module):
     """Minimal MoT-compatible expert for WAMStateChunkHead construction."""
 
     def __init__(self, action_dim):
@@ -603,35 +737,39 @@ class _FakeJointExpert(nn.Module):
         self.attn_head_dim = 4
 
 
-class WAMStateChunkHeadJointTest(unittest.TestCase):
-    """Joint ``[state_chunks | actions]`` chunk prediction tests."""
+class WAMStateChunkHeadExtendedActionTest(unittest.TestCase):
+    """Extended ``[state_chunks | actions]`` prediction tests."""
 
     @staticmethod
-    def _make_head(joint_state_action=True, action_dim=4, joint_dim=10):
+    def _make_head(joint_state_action=True,
+                   action_dim=4,
+                   extended_action_dim=10,
+                   action_output_format='action'):
         return WAMStateChunkHead(
-            video_expert=_FakeJointExpert(0),
-            state_expert=_FakeJointExpert(joint_dim),
+            video_expert=_FakeExtendedActionExpert(0),
+            state_expert=_FakeExtendedActionExpert(extended_action_dim),
             action_dim=action_dim,
             joint_state_action=joint_state_action,
+            action_output_format=action_output_format,
             text_dim=8,
             device='cpu',
             torch_dtype=torch.float32,
         )
 
-    def test_joint_head_dimensions(self):
+    def test_extended_action_dimensions(self):
         head = self._make_head()
         self.assertTrue(head.joint_state_action)
         self.assertEqual(head.state_chunk_dim, 6)
         self.assertEqual(head.controller_action_dim, 4)
         self.assertIsNone(head.action_decoder)
 
-    def test_joint_head_rejects_bad_dimensions(self):
+    def test_extended_action_rejects_bad_dimensions(self):
         with self.assertRaises(ValueError):
-            self._make_head(action_dim=10, joint_dim=10)
+            self._make_head(action_dim=10, extended_action_dim=10)
         with self.assertRaises(ValueError):
-            self._make_head(action_dim=12, joint_dim=10)
+            self._make_head(action_dim=12, extended_action_dim=10)
 
-    def test_joint_forward_concats_state_and_action(self):
+    def test_extended_action_forward_concats_state_and_action(self):
         head = self._make_head()
         captured = {}
 
@@ -683,20 +821,20 @@ class WAMStateChunkHeadJointTest(unittest.TestCase):
         self.assertNotIn('loss_idm_action', ret)
         self.assertEqual(ret['loss_state_to_action'].item(), 0.0)
 
-    def test_joint_predict_splits_state_and_action(self):
+    def test_extended_action_predict_splits_state_and_action(self):
         head = self._make_head()
 
         def fake_predict_action(self, *args, **kwargs):
-            joint = torch.zeros(1, 4, 10)
-            joint[..., :6] = 1.0
-            joint[..., 6:] = 2.0
-            return joint
+            extended_action = torch.zeros(1, 4, 10)
+            extended_action[..., :6] = 1.0
+            extended_action[..., 6:] = 2.0
+            return extended_action
 
         original = WAMHead.predict_action
         WAMHead.predict_action = fake_predict_action
         try:
             pred_actions, pred_state_chunks = head.predict_action(
-                action_horizon=4, return_state_chunks=True)
+                action_horizon=4, action_output_format='action_state_tuple')
             pred_state_chunk = head.predict_state_chunk(action_horizon=4)
         finally:
             WAMHead.predict_action = original
@@ -708,8 +846,41 @@ class WAMStateChunkHeadJointTest(unittest.TestCase):
         self.assertEqual(tuple(pred_state_chunk.shape), (1, 4, 6))
         self.assertTrue((pred_state_chunk == 1.0).all())
 
+    def test_rtc_treats_state_action_as_extended_action(self):
+        head = self._make_head(action_output_format='extended_action')
+        captured = {}
+
+        def fake_predict_action(self, *args, **kwargs):
+            captured.update(kwargs)
+            extended_action = torch.zeros(1, 4, 10)
+            extended_action[..., :6] = 1.0
+            extended_action[..., 6:] = 2.0
+            return extended_action
+
+        original = WAMHead.predict_action
+        WAMHead.predict_action = fake_predict_action
+        try:
+            prev_controller = torch.full((1, 2, 4), 2.0)
+            prev_states = torch.full((1, 2, 6), 1.0)
+            prev_extended = torch.cat([prev_controller, prev_states], dim=-1)
+            pred_extended = head.predict_action(
+                action_horizon=4,
+                prev_actions=prev_extended,
+                prefix_len=2,
+                rtc_config=dict(enabled=True, method='prefix'),
+            )
+        finally:
+            WAMHead.predict_action = original
+
+        expected_internal = torch.cat([prev_states, prev_controller], dim=-1)
+        torch.testing.assert_close(captured['prev_actions'], expected_internal)
+        self.assertEqual(captured['prefix_len'], 2)
+        self.assertEqual(tuple(pred_extended.shape), (1, 4, 10))
+        self.assertTrue((pred_extended[..., :4] == 2.0).all())
+        self.assertTrue((pred_extended[..., 4:] == 1.0).all())
+
     def test_legacy_state_chunk_head_unchanged(self):
-        head = self._make_head(joint_state_action=False, joint_dim=6)
+        head = self._make_head(joint_state_action=False, extended_action_dim=6)
         self.assertFalse(head.joint_state_action)
         self.assertEqual(head.state_chunk_dim, 6)
         captured = {}

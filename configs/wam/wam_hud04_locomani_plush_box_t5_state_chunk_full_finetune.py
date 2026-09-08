@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# WAM on HUD04 Loco-Mani task 2 with a state-action extended action.
-# The standalone dataset contains 296 episodes / 339,798 frames and has its
-# sole task remapped from source task_index=2 to task_index=0. Raw state/action
-# dimensions are 33/43 (the final action dimension is ``done``); both are
-# padded to 64 for WAM.
+# WAM on HUD04 Loco-Mani plush-to-chair and box-stacking tasks with a
+# state-action extended action.
+# The standalone dataset contains 404 episodes / 229,641 frames across two
+# tasks: moving the plush toy to the chair (213 episodes) and stacking the
+# first white box on the second (191 episodes). Raw state/action dimensions
+# are 33/43 (the final action dimension is ``done``); both are padded to 64.
 #
 # Precompute the Wan/T5 text embedding cache before training:
 #   python tools/wam/precompute_text_embeds.py \
@@ -42,7 +43,7 @@ _text_cache_dir = os.path.abspath(
     ))
 
 _data_root = ('/mnt/data/cpfs/users/jikun/vcube_data/'
-              'wbt_done_dim_0609_0630_task2')
+              'wbt_done_dim_0508_0518_plush_box')
 _locomani_data_roots = [_data_root]
 _action_dim = 64
 _proprio_dim = 64
@@ -53,7 +54,7 @@ _state_chunk_source_key = 'observation.state'
 _action_window_start_idx = 0
 _frame_window_size = 9
 _frame_sample_stride = 4
-_statistic_name = 'hud04_locomani_task2'
+_statistic_name = 'hud04_locomani_plush_box'
 _mode_probs = dict(forward=1.0, idm=1.0, policy=1.0)
 seed = 42
 _prompt_template = (
@@ -291,11 +292,14 @@ inference = dict(
     task_suite_name=_statistic_name,
     task_descriptions={
         '1':
-        ('Turn right and walk to the table. Pick up the basket from the '
-         'floor with the right hand. Pick up the plush toys on the table '
-         'with the left hand, one by one, and place them into the basket. '
-         'After all plush toys are in the basket, place the basket on the '
-         'floor.'),
+        ('Navigate forward to the first white box. Grasp the blue plush toy '
+         'from the first white box. Turn around and move to the chair. '
+         'Release the blue plush toy onto the chair.'),
+        '2':
+        ('Turn around and move back to the first white box. Bend down, grasp '
+         'the first white box with both hands, and lift it. Carry the first '
+         'white box to the second white box located in front of you. Place '
+         'the first white box on top of the second white box.'),
     },
     seed=7,
     state_dim=_proprio_dim,
