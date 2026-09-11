@@ -554,6 +554,7 @@ class Cosmos25Backbone(nn.Module):
         generator: Optional[Union[torch.Generator,
                                   Sequence[torch.Generator]]] = None,
     ) -> torch.Tensor:
+        del num_frames_out
         vae_dtype = getattr(self.vae, 'dtype', self.dtype)
         # The source path runs VideoProcessor normalization while pixels are
         # still FP32, then casts the normalized video to the VAE dtype. Doing
@@ -563,11 +564,6 @@ class Cosmos25Backbone(nn.Module):
         if video.min() >= 0.0:
             video = video * 2.0 - 1.0
         video = video.to(dtype=vae_dtype)
-        if video.shape[2] < num_frames_out:
-            pad = video.new_zeros(video.shape[0], video.shape[1],
-                                  num_frames_out - video.shape[2],
-                                  video.shape[3], video.shape[4])
-            video = torch.cat([video, pad], dim=2)
 
         samples = []
         is_generator_list = isinstance(generator, (list, tuple))
