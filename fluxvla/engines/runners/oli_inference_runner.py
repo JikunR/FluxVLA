@@ -16,6 +16,7 @@ import signal
 import time
 import unicodedata
 from collections import deque
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Dict
 
@@ -30,6 +31,36 @@ class _ShutdownRequested(Exception):
     """Raised internally to unwind the inference loop on shutdown."""
 
 
+@dataclass(frozen=True)
+class Transition:
+    """Result of evaluating one predicted done chunk."""
+
+    kind: str
+    next_skip_done_check: int
+
+
+def decide_advance(
+    done_chunk,
+    current_idx: int,
+    num_subtasks: int,
+    skip_done_check: int,
+    done_window: int,
+    done_threshold: float,
+    done_advance_cooldown: int,
+) -> Transition:
+    """Decide whether a denormalized done signal advances the task."""
+    if skip_done_check > 0:
+        return Transition('none', skip_done_check - 1)
+
+    window = max(1, int(done_window))
+    score = float(np.asarray(done_chunk[-window:]).mean())
+    if score < done_threshold:
+        return Transition('none', 0)
+    if current_idx >= num_subtasks - 1:
+        return Transition('final_done', 0)
+    return Transition('advance', int(done_advance_cooldown))
+
+
 @RUNNERS.register_module()
 class OliInferenceRunner(BaseInferenceRunner):
     """Runner for Oli whole-body (loco-manipulation) inference.
@@ -39,10 +70,11 @@ class OliInferenceRunner(BaseInferenceRunner):
     individual-finger representation. Each predicted action step is sent to
     ``OliOperator`` with time-based control.
 
-    No RTC, interpolation, async execution, or done-driven prompt switching.
-    Interactive execution selects a prompt ID and a positive execution count;
-    one execution corresponds to one predicted action chunk (optionally
-    truncated by ``execute_horizon``).
+    No RTC, interpolation, or async execution. It can split a learned done
+    dimension from controller actions for subclasses that implement automatic
+    prompt transitions. Interactive execution selects a prompt ID and a
+    positive execution count; one execution corresponds to one predicted
+    action chunk (optionally truncated by ``execute_horizon``).
     """
 
     def __init__(self,
@@ -54,6 +86,13 @@ class OliInferenceRunner(BaseInferenceRunner):
                  prepare_pose=None,
                  prepare_pose_duration_sec: float = 5.0,
                  prepare_pose_prompt_id: str = None,
+                 use_done_state_machine: bool = False,
+                 done_dim_index: int = 42,
+                 done_threshold: float = 0.7,
+                 done_window: int = 8,
+                 done_advance_cooldown: int = 25,
+                 done_subtask_order=None,
+                 stop_on_final_done: bool = False,
                  *args,
                  **kwargs):
         self.execute_horizon = execute_horizon
@@ -66,6 +105,13 @@ class OliInferenceRunner(BaseInferenceRunner):
         self.prepare_pose_duration_sec = float(prepare_pose_duration_sec)
         self.prepare_pose_prompt_id = (None if prepare_pose_prompt_id is None
                                        else str(prepare_pose_prompt_id))
+        self.use_done_state_machine = bool(use_done_state_machine)
+        self.done_dim_index = int(done_dim_index)
+        self.done_threshold = float(done_threshold)
+        self.done_window = int(done_window)
+        self.done_advance_cooldown = int(done_advance_cooldown)
+        self._done_subtask_order_arg = done_subtask_order
+        self.stop_on_final_done = bool(stop_on_final_done)
         if self.execute_horizon is not None and self.execute_horizon <= 0:
             raise ValueError('execute_horizon must be positive or None')
         if self.interactive and self.default_execution_count <= 0:
@@ -82,6 +128,14 @@ class OliInferenceRunner(BaseInferenceRunner):
             raise ValueError('prepare_pose_duration_sec must be positive')
         if self.prepare_pose_prompt_id == '':
             raise ValueError('prepare_pose_prompt_id must not be empty')
+        if self.done_dim_index < 0:
+            raise ValueError('done_dim_index must be non-negative')
+        if not 0.0 <= self.done_threshold <= 1.0:
+            raise ValueError('done_threshold must be in [0, 1]')
+        if self.done_window <= 0:
+            raise ValueError('done_window must be positive')
+        if self.done_advance_cooldown < 0:
+            raise ValueError('done_advance_cooldown must be non-negative')
 
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
             kwargs['camera_names'] = ['head']
@@ -129,12 +183,53 @@ class OliInferenceRunner(BaseInferenceRunner):
                     f'prepare_pose_prompt_id {self.prepare_pose_prompt_id!r} '
                     'conflicts with a task prompt ID')
 
+        self.done_subtask_order = (
+            list(self._done_subtask_order_arg) if self._done_subtask_order_arg
+            is not None else list(self.task_descriptions))
+        if self.use_done_state_machine:
+            if not self.done_subtask_order:
+                raise ValueError('done_subtask_order must not be empty')
+            unknown = [
+                task_id for task_id in self.done_subtask_order
+                if task_id not in self.task_descriptions
+            ]
+            if unknown:
+                raise ValueError(
+                    f'done_subtask_order contains unknown prompt IDs: '
+                    f'{unknown}')
+            if self.done_window > self.action_chunk:
+                raise ValueError('done_window must not exceed action_chunk')
+            if (self.execute_horizon is not None
+                    and self.done_window > self.execute_horizon):
+                raise ValueError('done_window must not exceed execute_horizon')
+            self._validate_done_statistics()
+
         self._running = True
         self._dt = 1.0 / self.publish_rate
         self._selected_prompt_id = self.default_prompt_id
         self._selected_execution_count = self.default_execution_count
 
         signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _validate_done_statistics(self):
+        denormalizer = getattr(self, 'denormalize_action', None)
+        norm_stats = getattr(denormalizer, 'norm_stats', None)
+        if norm_stats is None:
+            return
+        statistic_name = getattr(denormalizer, 'statistic_name', 'private')
+        action_stats = norm_stats[statistic_name]['action']
+        for key in ('min', 'max'):
+            if len(action_stats[key]) <= self.done_dim_index:
+                raise ValueError(
+                    f'action statistic {key!r} has only '
+                    f'{len(action_stats[key])} dimensions; done_dim_index='
+                    f'{self.done_dim_index}')
+        done_min = float(action_stats['min'][self.done_dim_index])
+        done_max = float(action_stats['max'][self.done_dim_index])
+        if not np.isclose(done_min, 0.0) or not np.isclose(done_max, 1.0):
+            raise ValueError(
+                'The configured done dimension must have binary range [0, 1], '
+                f'got [{done_min}, {done_max}].')
 
     def _signal_handler(self, signum, frame):
         """Handle SIGINT for graceful shutdown."""
@@ -389,6 +484,18 @@ class OliInferenceRunner(BaseInferenceRunner):
             sent_steps += 1
             time.sleep(self._dt)
         return sent_steps
+
+    def _postprocess_actions(self, raw_action):
+        """Denormalize actions, retain done, and return controller commands."""
+        actions = super()._postprocess_actions(raw_action)
+        if not self.use_done_state_machine:
+            return actions
+        if (actions.ndim != 2 or actions.shape[1] != self.done_dim_index + 1):
+            raise ValueError(
+                'Done-aware inference requires a 2D action chunk ending in '
+                f'done at index {self.done_dim_index}, got {actions.shape}.')
+        self._action_ctx.done_chunk = actions[:, self.done_dim_index].copy()
+        return actions[:, :self.done_dim_index]
 
     def _move_to_prepare_pose(self):
         """Smoothly move to the configured Oli prepare pose."""

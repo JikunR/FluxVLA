@@ -68,6 +68,29 @@ inference = dict(
 Set `joint_state_action=True` and `action_output_format='extended_action'` on
 `WAMStateChunkHead` for this mode.
 
+For sequential Oli tasks whose final action dimension is a binary `done`
+label, the RTC runner can switch prompts automatically:
+
+```python
+inference = dict(
+    type='OliRTCInferenceRunner',
+    use_done_state_machine=True,
+    done_dim_index=42,
+    done_threshold=0.7,
+    done_window=8,
+    done_advance_cooldown=25,
+    done_subtask_order=['1', '2'],
+    stop_on_final_done=True,
+    interactive=False,
+)
+```
+
+The runner evaluates the mean of the last `done_window` values in each
+accepted, denormalized prediction chunk. It starts a fresh RTC scheduler when
+advancing to the next prompt, and strips the trailing done dimension before
+sending controller commands. Keep `use_done_state_machine=False` for models
+that do not train a done action dimension.
+
 Mechanism: for each batch element, sample a delay `d ∈ [0, max_delay)`. The first `d` action steps are set to clean time (known no-noise states) and masked out from the loss.
 
 Delay distribution notes:

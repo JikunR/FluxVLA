@@ -23,7 +23,7 @@ import torch
 
 from ..utils import initialize_overwatch
 from ..utils.root import RUNNERS
-from .oli_inference_runner import OliInferenceRunner
+from .oli_inference_runner import OliInferenceRunner, decide_advance
 
 overwatch = initialize_overwatch(__name__)
 
@@ -255,7 +255,8 @@ class OliRTCInferenceRunner(OliInferenceRunner):
     execution count is interpreted as the number of model action chunks to
     generate.  A producer predicts the next chunk while an actor is still
     executing the current chunk.  The unexecuted tail is supplied to the next
-    model call through ``prev_actions`` / ``prefix_len``.
+    model call through ``prev_actions`` / ``prefix_len``. Optionally, a
+    denormalized done prediction advances through an ordered prompt sequence.
     """
 
     def __init__(self,
@@ -322,6 +323,9 @@ class OliRTCInferenceRunner(OliInferenceRunner):
 
     def run(self, initial_instruction='pour water into the cup'):
         overwatch.info('Starting Oli RTC inference runner')
+        if self.use_done_state_machine:
+            self._run_done_state_machine()
+            return
         if not self.interactive:
             prompt_id = self.default_prompt_id
             instruction = self._get_task_description(prompt_id)
@@ -332,6 +336,34 @@ class OliRTCInferenceRunner(OliInferenceRunner):
         while self._running:
             self._run_episode(initial_instruction)
 
+    def _run_done_state_machine(self):
+        """Run configured subtasks in order and advance on predicted done."""
+        current_idx = 0
+        skip_done_check = 0
+        while self._running and current_idx < len(self.done_subtask_order):
+            task_id = self.done_subtask_order[current_idx]
+            instruction = self._get_task_description(task_id)
+            self._selected_prompt_id = task_id
+            self._prev_ctx = None
+            advance_event = Event()
+            final_done_event = Event()
+            overwatch.info(f'[OliRTC done] starting task_idx={current_idx} '
+                           f'prompt_id={task_id}')
+            skip_done_check = self._run_rtc_instruction(
+                instruction=instruction,
+                chunk_count=None,
+                advance_event=advance_event,
+                final_done_event=final_done_event,
+                segment_idx=current_idx,
+                skip_done_check=skip_done_check,
+            )
+            if advance_event.is_set():
+                current_idx += 1
+                continue
+            if final_done_event.is_set() and self.stop_on_final_done:
+                self._running = False
+            break
+
     def _run_episode(self, default_instruction):
         instructions = self._get_user_task_instruction(default_instruction)
         if not instructions or not self._running:
@@ -340,13 +372,22 @@ class OliRTCInferenceRunner(OliInferenceRunner):
         self._run_rtc_instruction(
             instruction=instructions[0], chunk_count=len(instructions))
 
-    def _run_rtc_instruction(self, instruction: str, chunk_count: int | None):
+    def _run_rtc_instruction(self,
+                             instruction: str,
+                             chunk_count: int | None,
+                             advance_event: Event | None = None,
+                             final_done_event: Event | None = None,
+                             segment_idx: int = 0,
+                             skip_done_check: int = 0) -> int:
         if chunk_count is not None and chunk_count <= 0:
-            return
+            return skip_done_check
 
         scheduler = self._make_scheduler()
         stop_event = Event()
         producer_done = Event()
+        advance_event = advance_event or Event()
+        final_done_event = final_done_event or Event()
+        done_state = {'skip_done_check': int(skip_done_check)}
         self._rtc_stop_event = stop_event
         self._last_rtc_chunk_count = 0
         self._last_rtc_action_count = 0
@@ -354,7 +395,8 @@ class OliRTCInferenceRunner(OliInferenceRunner):
         producer = Thread(
             target=self._producer_loop,
             args=(instruction, chunk_count, scheduler, stop_event,
-                  producer_done),
+                  producer_done, advance_event, final_done_event, segment_idx,
+                  done_state),
             daemon=True,
             name='OliRTCProducer')
         actor = Thread(
@@ -377,7 +419,9 @@ class OliRTCInferenceRunner(OliInferenceRunner):
             deadline = time.monotonic() + timeout
         pause_requested = False
         timed_out = False
-        while self._running and (producer.is_alive() or actor.is_alive()):
+        while (self._running and not advance_event.is_set()
+               and not final_done_event.is_set()
+               and (producer.is_alive() or actor.is_alive())):
             if self.interactive and self._poll_keyboard_pause():
                 pause_requested = True
                 stop_event.set()
@@ -390,7 +434,8 @@ class OliRTCInferenceRunner(OliInferenceRunner):
                 break
             stop_event.wait(0.05)
 
-        if not self._running:
+        if (not self._running or advance_event.is_set()
+                or final_done_event.is_set()):
             stop_event.set()
         if pause_requested or timed_out or not self._running:
             # Inference itself is not cancellable. Wait for both workers to
@@ -405,10 +450,13 @@ class OliRTCInferenceRunner(OliInferenceRunner):
         self._rtc_stop_event = None
         if pause_requested and self._running:
             self._handle_keyboard_pause()
+        return done_state['skip_done_check']
 
     def _producer_loop(self, instruction: str, chunk_count: int | None,
                        scheduler: OliRTCChunkScheduler, stop_event: Event,
-                       producer_done: Event):
+                       producer_done: Event, advance_event: Event,
+                       final_done_event: Event, segment_idx: int,
+                       done_state: dict):
         committed_chunks = 0
         next_chunk_id = 0
         try:
@@ -445,6 +493,41 @@ class OliRTCInferenceRunner(OliInferenceRunner):
                             f'{committed_chunks}/{chunk_count}')
                         overwatch.info(f'[OliRTC] committed chunk {progress} '
                                        f'prefix_len={request.prefix_len}')
+                        if self.use_done_state_machine:
+                            done_chunk = getattr(self._action_ctx,
+                                                 'done_chunk', None)
+                            if done_chunk is None:
+                                raise RuntimeError(
+                                    'Done-aware inference did not produce a '
+                                    'done chunk.')
+                            transition = decide_advance(
+                                done_chunk=done_chunk,
+                                current_idx=segment_idx,
+                                num_subtasks=len(self.done_subtask_order),
+                                skip_done_check=done_state['skip_done_check'],
+                                done_window=self.done_window,
+                                done_threshold=self.done_threshold,
+                                done_advance_cooldown=(
+                                    self.done_advance_cooldown),
+                            )
+                            done_state['skip_done_check'] = (
+                                transition.next_skip_done_check)
+                            window = max(1, self.done_window)
+                            score = float(
+                                np.asarray(done_chunk[-window:]).mean())
+                            overwatch.info(
+                                f'[OliRTC done] task_idx={segment_idx} '
+                                f'done_score={score:.3f} '
+                                f'threshold={self.done_threshold} '
+                                f'transition={transition.kind}')
+                            if transition.kind == 'advance':
+                                advance_event.set()
+                                stop_event.set()
+                                return
+                            if transition.kind == 'final_done':
+                                final_done_event.set()
+                                stop_event.set()
+                                return
                     else:
                         debug = scheduler.last_commit_debug()
                         overwatch.warning(
