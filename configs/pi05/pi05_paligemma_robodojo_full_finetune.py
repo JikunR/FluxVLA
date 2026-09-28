@@ -486,14 +486,13 @@ eval = dict(
 
 themis = dict(
     transport=dict(
-        host='127.0.0.1',
-        port=5555,
-        timeout_s=30.0,
+        endpoint='tcp://127.0.0.1:5555',
+        connect_timeout_s=None,
+        request_timeout_s=120.0,
         image_keys=['cam_high', 'cam_left_wrist', 'cam_right_wrist'],
         state_keys=['states'],
         unnorm_key='robodojo_arx_x5',
-        image_encoding='rgb8',
-        report_service_name='/fluxvla/report_evaluation',
+        evaluation_reporting=True,
     ),
     runner=dict(
         type='EvalRunner',
@@ -518,14 +517,25 @@ themis = dict(
         simulator_gpu_ids=None,
         work_dir='work_dirs/fluxthemis',
     ),
-    ros_server=dict(
+    client=dict(
+        rollout_bind='tcp://0.0.0.0:5560',
+        supervisor_bind='tcp://0.0.0.0:5561',
+        heartbeat_timeout_s=30.0,
+        shutdown_timeout_s=30.0),
+    server=dict(
+        mode='stateless',
         dataset_section='eval',
-        evaluation_reporting=dict(),
-        device='cuda:0',
+        minimum_ready_workers=1,
+        max_pending_requests=128,
+        distributed=dict(
+            frontend_bind='tcp://0.0.0.0:5555',
+            model_worker_bind='tcp://0.0.0.0:5556',
+            supervisor_bind='tcp://0.0.0.0:5557'),
+        evaluation_reporting=dict(enabled=True),
         workers=dict(
             startup_timeout_s=900.0,
             request_timeout_s=120.0,
-            lease_timeout_s=900.0,
+            heartbeat_timeout_s=30.0,
         ),
         mixed_precision_dtype='bf16',
         enable_mixed_precision=True,

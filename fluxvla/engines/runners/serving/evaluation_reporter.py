@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Durable ROS evaluation events and native FluxVLA evaluation artifacts.
+"""Durable evaluation events and native FluxVLA evaluation artifacts.
 
-``FluxVLAROSEvaluationReporter`` is the small adapter boundary used by ROS 1
-and ROS 2 servers.  A server passes versioned ``run_start``,
+``FluxVLAEvaluationReporter`` is the transport-neutral adapter used by the
+ZMQ server. A server passes versioned ``run_start``,
 ``episode_start``, ``episode_end`` and ``run_end`` events to
 ``process_event``.  The reporter validates ordering and idempotency, journals
 accepted events, maintains native live progress, and writes the native LIBERO,
 RoboCasa, or RoboDojo result schema selected by the evaluation config.
 
-The class deliberately has no ROS dependency.  Server adapters may construct
-it before ROS initialization and later replace the default Overwatch logger
-with :meth:`set_logger`.
+The class deliberately has no transport dependency. Server adapters may
+construct it before binding sockets and later replace the default Overwatch
+logger with :meth:`set_logger`.
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ ROBODOJO_STANDALONE_EPISODES = 50
 
 
 class EvaluationEventError(ValueError):
-    """A rejected ROS evaluation event."""
+    """A rejected evaluation event."""
 
 
 @dataclass(frozen=True)
@@ -163,7 +163,7 @@ def _runner_eval_config(config):
         return config
     if isinstance(config, Mapping) and isinstance(runner, Mapping):
         # Some configs wrap runner-native fields in ``eval.runner`` while the
-        # ROS server adds authoritative task overrides at ``eval`` level.
+        # The server adds authoritative task overrides at ``eval`` level.
         # Preserve both, with the outer values taking precedence.
         merged = dict(runner)
         merged.update(
@@ -343,8 +343,8 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
-class FluxVLAROSEvaluationReporter:
-    """Consume ROS evaluation lifecycle events and write native artifacts.
+class FluxVLAEvaluationReporter:
+    """Consume evaluation lifecycle events and write native artifacts.
 
     Args:
         result_root: Result root. It is resolved to an absolute path;
@@ -442,7 +442,7 @@ class FluxVLAROSEvaluationReporter:
             # Protocol and artifact errors are returned in-band.
             except Exception as exc:
                 error = f'{type(exc).__name__}: {exc}'
-                self._log(f'[ros-eval] rejected event: {error}')
+                self._log(f'[zmq-eval] rejected event: {error}')
                 active = self._active
                 return {
                     'accepted': False,
@@ -693,12 +693,12 @@ class FluxVLAROSEvaluationReporter:
             tasks_by_index=tasks_by_index,
         )
         self._append_log(
-            state, f'ROS evaluation session: {session_id}\n'
+            state, f'ZMQ evaluation session: {session_id}\n'
             f'task_suite: {self.task_suite_name}\n'
             f'model_family: {self.model_family}\n'
             f'config: {self.config_path}\n'
             f'ckpt: {self.ckpt_path}\n')
-        self._log(f'[ros-eval] run_start session={session_id} '
+        self._log(f'[zmq-eval] run_start session={session_id} '
                   f'episodes={total_episodes} run_dir={run_dir}')
         return state
 
@@ -922,7 +922,7 @@ class FluxVLAROSEvaluationReporter:
             f'# episodes completed: {completed}\n'
             f'# successes: '
             f"{sum(bool(item['success']) for item in state.episodes)}\n")
-        self._log(f'[ros-eval] run_end status={status} '
+        self._log(f'[zmq-eval] run_end status={status} '
                   f'episodes={completed}/{total} run_dir={state.run_dir}')
         return status
 
@@ -930,7 +930,7 @@ class FluxVLAROSEvaluationReporter:
                               summary_path: Path) -> dict:
         eligible, reason = self._feishu_eligibility(state, end)
         if not eligible:
-            self._log(f'[ros-eval] Feishu skipped: {reason}')
+            self._log(f'[zmq-eval] Feishu skipped: {reason}')
             return {
                 'reported_to_feishu': False,
                 'report_reason': reason,
@@ -949,7 +949,7 @@ class FluxVLAROSEvaluationReporter:
                 log_unconfigured=True)
         except Exception as exc:  # Feishu is best effort after local commit.
             reason = f'{type(exc).__name__}: {exc}'
-            self._log(f'[ros-eval] Feishu skipped: {reason}')
+            self._log(f'[zmq-eval] Feishu skipped: {reason}')
             return {
                 'reported_to_feishu': False,
                 'report_reason': reason,
@@ -1095,7 +1095,7 @@ class FluxVLAROSEvaluationReporter:
         if all_scores:
             self._log(f'# mean score: '
                       f'{sum(all_scores) / len(all_scores) * 100:.1f}%')
-        self._log(f'[ros-eval] wrote {self.report_kind.upper()} summary '
+        self._log(f'[zmq-eval] wrote {self.report_kind.upper()} summary '
                   f'artifacts to {state.run_dir}')
         return summary_path
 
@@ -1407,11 +1407,11 @@ class FluxVLAROSEvaluationReporter:
         (state.run_dir / 'summary.txt').write_text(
             '\n'.join(text_lines) + '\n', encoding='utf-8')
 
-        self._log('[ros-eval] RoboDojo official overview (Score/SR%):\n'
+        self._log('[zmq-eval] RoboDojo official overview (Score/SR%):\n'
                   f'{overview_header}\n{overview_separator}\n{overview_row}')
-        self._log(f'[ros-eval] official task cells '
+        self._log(f'[zmq-eval] official task cells '
                   f'{completed_task_cells}/{expected_task_cells}')
-        self._log(f'[ros-eval] wrote RoboDojo summary artifacts to '
+        self._log(f'[zmq-eval] wrote RoboDojo summary artifacts to '
                   f'{state.run_dir}')
         return summary_path
 
@@ -1593,7 +1593,7 @@ class FluxVLAROSEvaluationReporter:
         _write_json_atomic(summary_path, summary)
         self._log(f'# episodes completed: {total_trials}')
         self._log(f'# successes: {total_successes} ({overall_rate:.1f}%)')
-        self._log(f'[ros-eval] wrote RoboCasa summary artifacts to '
+        self._log(f'[zmq-eval] wrote RoboCasa summary artifacts to '
                   f'{state.run_dir}')
         return summary_path
 
@@ -1833,7 +1833,7 @@ class FluxVLAROSEvaluationReporter:
                 else:
                     journal_path.unlink(missing_ok=True)
             except OSError as rollback_error:
-                self._log('[ros-eval] failed to roll back journal append: '
+                self._log('[zmq-eval] failed to roll back journal append: '
                           f'{rollback_error}')
             raise
 
@@ -1859,7 +1859,7 @@ class FluxVLAROSEvaluationReporter:
             self._logger(message)
         # Logging must never fail evaluation reporting.
         except Exception as exc:
-            overwatch.warning(f'[ros-eval] logger failed: {exc}; {message}')
+            overwatch.warning(f'[zmq-eval] logger failed: {exc}; {message}')
 
 
-__all__ = ['EvaluationEventError', 'FluxVLAROSEvaluationReporter']
+__all__ = ['EvaluationEventError', 'FluxVLAEvaluationReporter']

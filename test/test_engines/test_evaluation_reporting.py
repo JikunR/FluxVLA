@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from fluxvla.engines.runners.serving.ros_server import \
-    _resolve_report_result_root
+from fluxvla.engines.runners.serving.policy import resolve_report_result_root
 
 
 def test_report_result_root_defaults_next_to_checkpoints(tmp_path):
     checkpoint = tmp_path / 'run' / 'checkpoints' / 'step-10.safetensors'
 
-    result_root = _resolve_report_result_root(None, checkpoint)
+    result_root = resolve_report_result_root(None, checkpoint)
 
     assert result_root == tmp_path / 'run'
 
@@ -27,6 +26,6 @@ def test_report_result_root_defaults_next_to_checkpoints(tmp_path):
 def test_relative_report_result_root_uses_checkpoint_run_dir(tmp_path):
     checkpoint = tmp_path / 'run' / 'checkpoints' / 'step-10.safetensors'
 
-    result_root = _resolve_report_result_root('reports', checkpoint)
+    result_root = resolve_report_result_root('reports', checkpoint)
 
     assert result_root == tmp_path / 'run' / 'reports'

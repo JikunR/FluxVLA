@@ -328,9 +328,9 @@ eval = dict(
 
 themis = dict(
     transport=dict(
-        service_name='/fluxvla/predict_action',
-        report_service_name='/fluxvla/report_evaluation',
-        timeout_s=30.0,
+        endpoint='tcp://127.0.0.1:5555',
+        connect_timeout_s=None,
+        request_timeout_s=120.0,
         image_keys=['agentview_image', 'robot0_eye_in_hand_image'],
         state_keys=[
             'robot0_eef_pos',
@@ -338,7 +338,7 @@ themis = dict(
             'robot0_gripper_qpos',
         ],
         unnorm_key='libero_10_no_noops',
-        image_encoding='rgb8',
+        evaluation_reporting=True,
     ),
     runner=dict(
         type='EvalRunner',
@@ -351,7 +351,7 @@ themis = dict(
             simulator_seed=0,
             num_steps_wait=10,
         ),
-        model_client=dict(type='FluxVLAROSModelClient'),
+        model_client=dict(type='FluxVLAZMQModelClient'),
         evaluator=dict(type='SuccessRateEvaluator'),
         seed=7,
         episodes_per_task=50,
@@ -362,15 +362,25 @@ themis = dict(
         simulator_gpu_ids=None,
         work_dir='work_dirs/fluxthemis',
     ),
-    ros_server=dict(
-        ros_version=1,
+    client=dict(
+        rollout_bind='tcp://0.0.0.0:5560',
+        supervisor_bind='tcp://0.0.0.0:5561',
+        heartbeat_timeout_s=30.0,
+        shutdown_timeout_s=30.0),
+    server=dict(
+        mode='stateless',
         dataset_section='eval',
-        evaluation_reporting=dict(),
-        device='cuda:0',
+        minimum_ready_workers=1,
+        max_pending_requests=128,
+        distributed=dict(
+            frontend_bind='tcp://0.0.0.0:5555',
+            model_worker_bind='tcp://0.0.0.0:5556',
+            supervisor_bind='tcp://0.0.0.0:5557'),
+        evaluation_reporting=dict(enabled=True),
         workers=dict(
             startup_timeout_s=900.0,
             request_timeout_s=120.0,
-            lease_timeout_s=900.0,
+            heartbeat_timeout_s=30.0,
         ),
         mixed_precision_dtype='bf16',
         enable_mixed_precision=True,

@@ -709,9 +709,9 @@ eval = dict(
 
 themis = dict(
     transport=dict(
-        service_name='/fluxvla/predict_action',
-        report_service_name='/fluxvla/report_evaluation',
-        timeout_s=30.0,
+        endpoint='tcp://127.0.0.1:5555',
+        connect_timeout_s=None,
+        request_timeout_s=120.0,
         image_keys=['video.ego_view_bg_crop_pad_res256_freq20'],
         state_keys=[
             'state.left_arm',
@@ -721,7 +721,7 @@ themis = dict(
             'state.waist',
         ],
         unnorm_key=_ROBOCASA_STATISTIC_NAME,
-        image_encoding='rgb8',
+        evaluation_reporting=True,
     ),
     runner=dict(
         type='EvalRunner',
@@ -733,7 +733,7 @@ themis = dict(
             prompt_key='annotation.human.coarse_action',
             render_key='video.ego_view_pad_res256_freq20',
         ),
-        model_client=dict(type='FluxVLAROSModelClient'),
+        model_client=dict(type='FluxVLAZMQModelClient'),
         evaluator=dict(type='SuccessRateEvaluator'),
         seed=eval['seed'],
         # Preserve the old inherited config's base-time value. The formal
@@ -746,15 +746,25 @@ themis = dict(
         simulator_gpu_ids=None,
         work_dir='work_dirs/fluxthemis',
     ),
-    ros_server=dict(
-        ros_version=1,
+    client=dict(
+        rollout_bind='tcp://0.0.0.0:5560',
+        supervisor_bind='tcp://0.0.0.0:5561',
+        heartbeat_timeout_s=30.0,
+        shutdown_timeout_s=30.0),
+    server=dict(
+        mode='stateless',
         dataset_section='eval',
-        evaluation_reporting=dict(report_kind='robocasa', ),
-        device='cuda:0',
+        minimum_ready_workers=1,
+        max_pending_requests=128,
+        distributed=dict(
+            frontend_bind='tcp://0.0.0.0:5555',
+            model_worker_bind='tcp://0.0.0.0:5556',
+            supervisor_bind='tcp://0.0.0.0:5557'),
+        evaluation_reporting=dict(enabled=True, report_kind='robocasa'),
         workers=dict(
             startup_timeout_s=900.0,
             request_timeout_s=120.0,
-            lease_timeout_s=900.0,
+            heartbeat_timeout_s=30.0,
         ),
         mixed_precision_dtype='bf16',
         enable_mixed_precision=True,
