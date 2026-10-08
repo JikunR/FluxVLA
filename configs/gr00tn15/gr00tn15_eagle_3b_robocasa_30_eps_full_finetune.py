@@ -275,9 +275,6 @@ eval = dict(
 
 themis = dict(
     transport=dict(
-        endpoint='tcp://127.0.0.1:5555',
-        connect_timeout_s=None,
-        request_timeout_s=120.0,
         image_keys=['video.ego_view_bg_crop_pad_res256_freq20'],
         state_keys=[
             'state.left_arm',
@@ -306,35 +303,9 @@ themis = dict(
         max_episode_steps=eval['max_episode_steps'],
         execute_horizon=eval['eval_chunk_size'],
         stop_on_success=True,
-        parallel_workers=1,
-        simulator_gpu_ids=None,
-        work_dir='work_dirs/fluxthemis',
     ),
-    client=dict(
-        rollout_bind='tcp://0.0.0.0:5560',
-        supervisor_bind='tcp://0.0.0.0:5561',
-        heartbeat_timeout_s=30.0,
-        shutdown_timeout_s=30.0),
     server=dict(
-        mode='stateless',
-        dataset_section='eval',
-        minimum_ready_workers=1,
-        max_pending_requests=128,
-        distributed=dict(
-            frontend_bind='tcp://0.0.0.0:5555',
-            model_worker_bind='tcp://0.0.0.0:5556',
-            supervisor_bind='tcp://0.0.0.0:5557'),
         evaluation_reporting=dict(enabled=True, report_kind='robocasa'),
-        workers=dict(
-            startup_timeout_s=900.0,
-            request_timeout_s=120.0,
-            heartbeat_timeout_s=30.0,
-        ),
-        mixed_precision_dtype='bf16',
-        enable_mixed_precision=True,
-        model_outputs_environment_actions=False,
-        forward_seed=False,
-        denormalize_context={},
         denormalize_per_action=True,
     ),
 )

@@ -81,8 +81,7 @@ def test_rejects_worker_count_larger_than_visible_devices():
 
 
 def test_explicit_worker_devices_override_auto_discovery():
-    devices = resolve_inference_devices({'workers': {}},
-                                        worker_devices=['cuda:2', 'cpu'],
-                                        num_workers=None)
+    devices = resolve_inference_devices(
+        worker_devices=['cuda:2', 'cpu'], num_workers=None)
 
     assert devices == ('2', 'cpu')

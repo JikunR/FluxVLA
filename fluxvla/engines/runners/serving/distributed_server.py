@@ -905,7 +905,7 @@ def run_model_worker(config_path: str,
 
     context = zmq.Context()
     backend = context.socket(zmq.DEALER)
-    identity = f'{worker_id}:{generation}'.encode()
+    identity = '{}:{}'.format(worker_id, generation).encode()
     backend.setsockopt(zmq.IDENTITY, identity)
     backend.setsockopt(zmq.LINGER, 0)
     backend.connect(_endpoint(backend_endpoint, 'backend_endpoint'))
@@ -1012,7 +1012,7 @@ def build_evaluation_reporter_from_config(
             'themis.server.evaluation_reporting'))
     if not bool(reporting_cfg.get('enabled', False)):
         return None
-    section_name = server_cfg.get('dataset_section')
+    section_name = server_cfg.get('dataset_section', 'eval')
     if section_name not in {'eval', 'inference'}:
         raise ValueError('themis.server.dataset_section must be `eval` or '
                          '`inference`')
@@ -1070,7 +1070,8 @@ def server_fingerprints(config_path: str, ckpt_path: str) -> tuple[str, str]:
     config_hash = hashlib.sha256(config_bytes).hexdigest()
     checkpoint = Path(ckpt_path).expanduser().resolve()
     stat = checkpoint.stat()
-    checkpoint_value = f'{checkpoint}:{stat.st_size}:{stat.st_mtime_ns}'
+    checkpoint_value = '{}:{}:{}'.format(checkpoint, stat.st_size,
+                                         stat.st_mtime_ns)
     checkpoint_hash = hashlib.sha256(checkpoint_value.encode()).hexdigest()
     return config_hash, checkpoint_hash
 
@@ -1110,9 +1111,12 @@ def launch_server_task(*,
             os.environ.get('FLUXVLA_DEPLOYMENT_ID')
             or os.environ.get('TORCHELASTIC_RUN_ID'))
     if not deployment_id:
-        stable = (f'{os.environ.get("MASTER_ADDR", "127.0.0.1")}:'
-                  f'{os.environ.get("MASTER_PORT", "29500")}:'
-                  f'{Path(config_path).resolve()}:{Path(ckpt_path).resolve()}')
+        stable = '{}:{}:{}:{}'.format(
+            os.environ.get('MASTER_ADDR', '127.0.0.1'),
+            os.environ.get('MASTER_PORT', '29500'),
+            Path(config_path).resolve(),
+            Path(ckpt_path).resolve(),
+        )
         deployment_id = hashlib.sha256(stable.encode()).hexdigest()[:32]
 
     coordinator_process = None

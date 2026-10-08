@@ -265,7 +265,7 @@ def build_policy_from_config(cfg: Any,
             themis_cfg.get('transport', _MISSING), 'themis.transport'))
     server_cfg = get_server_config(themis_cfg)
 
-    section_name = server_cfg.get('dataset_section')
+    section_name = server_cfg.get('dataset_section', 'eval')
     if section_name not in {'eval', 'inference'}:
         raise ValueError('themis.server.dataset_section must be `eval` or '
                          '`inference`')
@@ -359,12 +359,9 @@ def get_server_config(themis_cfg: Mapping[str, Any]) -> dict[str, Any]:
     return server_cfg
 
 
-def resolve_inference_devices(server_cfg: Mapping[str, Any],
-                              worker_devices: Sequence[str] | None,
+def resolve_inference_devices(worker_devices: Sequence[str] | None,
                               num_workers: int | None) -> tuple[str, ...]:
     """Resolve model-worker devices, defaulting to every visible GPU."""
-    workers_cfg = require_mapping(
-        server_cfg.get('workers', {}), 'themis.server.workers')
     if worker_devices is not None and num_workers is not None:
         raise ValueError(
             'worker_devices and num_workers are mutually exclusive')
@@ -375,12 +372,6 @@ def resolve_inference_devices(server_cfg: Mapping[str, Any],
     elif num_workers is not None:
         values = discover_cuda_worker_devices(
             positive_integer(num_workers, 'num_workers'))
-    elif workers_cfg.get('devices') is not None:
-        values = workers_cfg['devices']
-    elif workers_cfg.get('num_workers') is not None:
-        count = positive_integer(workers_cfg['num_workers'],
-                                 'themis.server.workers.num_workers')
-        values = discover_cuda_worker_devices(count)
     else:
         values = discover_cuda_worker_devices()
 
