@@ -77,7 +77,7 @@ class StatelessZMQCoordinator:
                  deployment_id: str | None = None,
                  config_fingerprint: str = '',
                  checkpoint_fingerprint: str = '',
-                 exit_after_run: bool = False) -> None:
+                 keep_alive: bool = False) -> None:
         self.frontend_bind = _endpoint(frontend_bind, 'frontend_bind')
         self.backend_bind = _endpoint(backend_bind, 'backend_bind')
         self.control_bind = _endpoint(control_bind, 'control_bind')
@@ -105,7 +105,7 @@ class StatelessZMQCoordinator:
         self.deployment_id = deployment_id or uuid.uuid4().hex
         self.config_fingerprint = str(config_fingerprint)
         self.checkpoint_fingerprint = str(checkpoint_fingerprint)
-        self.exit_after_run = bool(exit_after_run)
+        self.keep_alive = bool(keep_alive)
 
         self._workers: dict[bytes, _ModelWorkerState] = {}
         self._workers_by_id: dict[str, bytes] = {}
@@ -299,7 +299,7 @@ class StatelessZMQCoordinator:
                 ok=True,
                 request_id=str(header.get('request_id', '')),
             ), encode_frame(dict(result)))
-        if (self.exit_after_run and header.get('event_type') == 'run_end'
+        if (not self.keep_alive and header.get('event_type') == 'run_end'
                 and bool(result.get('accepted', False))):
             self._begin_shutdown()
 
@@ -1092,7 +1092,7 @@ def launch_server_task(*,
                        request_timeout_s: float,
                        startup_timeout_s: float,
                        heartbeat_timeout_s: float,
-                       exit_after_run: bool,
+                       keep_alive: bool = False,
                        cfg_options: Mapping[str, Any] | None = None,
                        node_rank: int | None = None,
                        world_size: int | None = None,
@@ -1140,7 +1140,7 @@ def launch_server_task(*,
                 'startup_timeout_s': startup_timeout_s,
                 'heartbeat_timeout_s': heartbeat_timeout_s,
                 'deployment_id': deployment_id,
-                'exit_after_run': exit_after_run,
+                'keep_alive': keep_alive,
                 'parent_pid': os.getpid(),
             },
             name='fluxvla-zmq-coordinator',

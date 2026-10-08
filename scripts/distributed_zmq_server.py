@@ -87,7 +87,10 @@ def parse_args(argv=None):
         '--heartbeat-timeout-s',
         type=float,
         default=DEFAULT_HEARTBEAT_TIMEOUT_S)
-    parser.add_argument('--exit-after-run', action='store_true')
+    parser.add_argument(
+        '--keep-alive',
+        action='store_true',
+        help='Keep serving after an accepted run_end event.')
     parser.add_argument(
         '--cfg-options', nargs='+', action=DictAction, default=None)
     return parser.parse_args(argv)
@@ -168,7 +171,7 @@ def main(argv=None) -> int:
         request_timeout_s=args.request_timeout_s,
         startup_timeout_s=args.startup_timeout_s,
         heartbeat_timeout_s=args.heartbeat_timeout_s,
-        exit_after_run=args.exit_after_run,
+        keep_alive=args.keep_alive,
         cfg_options=args.cfg_options,
     )
     return 0

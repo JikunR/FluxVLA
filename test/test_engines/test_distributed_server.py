@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 import uuid
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -17,7 +18,7 @@ from fluxvla.engines.runners.serving.zmq_protocol import (decode_frame,
 def _free_endpoint():
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
-        return f'tcp://127.0.0.1:{probe.getsockname()[1]}'
+        return 'tcp://127.0.0.1:{}'.format(probe.getsockname()[1])
 
 
 def _request(endpoint, header, payload):
@@ -35,6 +36,33 @@ def _request(endpoint, header, payload):
     finally:
         client.close(linger=0)
         context.term()
+
+
+class _Reporter:
+
+    def process_event(self, **kwargs):
+        return {'accepted': True}
+
+
+def test_run_end_shutdown_is_default_and_keep_alive_is_opt_in():
+    header = {
+        'event_type': 'run_end',
+        'request_id': 'request',
+        'run_id': 'run',
+        'sequence': 1,
+    }
+    for keep_alive, expected_shutdowns in ((False, 1), (True, 0)):
+        coordinator = StatelessZMQCoordinator(
+            frontend_bind=_free_endpoint(),
+            backend_bind=_free_endpoint(),
+            control_bind=_free_endpoint(),
+            evaluation_reporter=_Reporter(),
+            keep_alive=keep_alive,
+        )
+        coordinator._send_frontend = Mock()
+        coordinator._begin_shutdown = Mock()
+        coordinator._handle_report((), header, encode_frame({}))
+        assert coordinator._begin_shutdown.call_count == expected_shutdowns
 
 
 def test_one_model_worker_serves_two_concurrent_clients():
