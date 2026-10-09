@@ -269,14 +269,10 @@ eval = dict(
 
 themis = dict(
     transport=dict(
-        host='127.0.0.1',
-        port=5555,
-        timeout_s=30.0,
         image_keys=['cam_high', 'cam_left_wrist', 'cam_right_wrist'],
         state_keys=['states'],
         unnorm_key='robodojo_arx_x5',
-        image_encoding='rgb8',
-        report_service_name='/fluxvla/report_evaluation',
+        evaluation_reporting=True,
     ),
     runner=dict(
         type='EvalRunner',
@@ -297,23 +293,9 @@ themis = dict(
         max_episode_steps=2000,
         execute_horizon=50,
         stop_on_success=True,
-        parallel_workers=1,
-        simulator_gpu_ids=None,
-        work_dir='work_dirs/fluxthemis',
     ),
-    ros_server=dict(
-        dataset_section='eval',
-        evaluation_reporting=dict(),
-        device='cuda:0',
-        workers=dict(
-            startup_timeout_s=900.0,
-            request_timeout_s=120.0,
-            lease_timeout_s=900.0,
-        ),
-        mixed_precision_dtype='bf16',
-        enable_mixed_precision=True,
-        model_outputs_environment_actions=False,
-        forward_seed=False,
+    server=dict(
+        evaluation_reporting=dict(enabled=True),
         denormalize_context=dict(task_suite_name='robodojo_arx_x5'),
     ),
 )

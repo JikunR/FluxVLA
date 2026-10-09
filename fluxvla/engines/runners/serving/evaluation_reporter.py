@@ -11,27 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Durable ROS evaluation events and native FluxVLA evaluation artifacts.
+"""Durable evaluation events and native FluxVLA evaluation artifacts.
 
-``FluxVLAROSEvaluationReporter`` is the small adapter boundary used by ROS 1
-and ROS 2 servers.  A server passes versioned ``run_start``,
+``FluxVLAEvaluationReporter`` is the transport-neutral adapter used by the
+ZMQ server. A server passes versioned ``run_start``,
 ``episode_start``, ``episode_end`` and ``run_end`` events to
-``process_event``.  The reporter validates ordering and idempotency, journals
+``process_event``.  The reporter validates ordering, journals
 accepted events, maintains native live progress, and writes the native LIBERO,
 RoboCasa, or RoboDojo result schema selected by the evaluation config.
 
-The class deliberately has no ROS dependency.  Server adapters may construct
-it before ROS initialization and later replace the default Overwatch logger
-with :meth:`set_logger`.
+The class deliberately has no transport dependency. Server adapters may
+construct it before binding sockets and later replace the default Overwatch
+logger with :meth:`set_logger`.
 """
 
 from __future__ import annotations
-import copy
 import csv
 import json
 import math
 import os
-import threading
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -120,7 +118,7 @@ ROBODOJO_STANDALONE_EPISODES = 50
 
 
 class EvaluationEventError(ValueError):
-    """A rejected ROS evaluation event."""
+    """A rejected evaluation event."""
 
 
 @dataclass(frozen=True)
@@ -145,12 +143,6 @@ class _RunState:
     completed_keys: set[tuple[int, int]] = field(default_factory=set)
 
 
-@dataclass(frozen=True)
-class _CachedRequest:
-    fingerprint: str
-    response: dict
-
-
 def _cfg_get(config, key: str, default=None):
     if isinstance(config, Mapping):
         return config.get(key, default)
@@ -163,7 +155,7 @@ def _runner_eval_config(config):
         return config
     if isinstance(config, Mapping) and isinstance(runner, Mapping):
         # Some configs wrap runner-native fields in ``eval.runner`` while the
-        # ROS server adds authoritative task overrides at ``eval`` level.
+        # The server adds authoritative task overrides at ``eval`` level.
         # Preserve both, with the outer values taking precedence.
         merged = dict(runner)
         merged.update(
@@ -343,8 +335,8 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
-class FluxVLAROSEvaluationReporter:
-    """Consume ROS evaluation lifecycle events and write native artifacts.
+class FluxVLAEvaluationReporter:
+    """Consume evaluation lifecycle events and write native artifacts.
 
     Args:
         result_root: Result root. It is resolved to an absolute path;
@@ -364,7 +356,7 @@ class FluxVLAROSEvaluationReporter:
             variable fallback.
 
     ``process_event`` returns a response dict containing ``accepted``,
-    ``error``, ``run_dir``, ``duplicate``, ``next_sequence`` and ``status``.
+    ``error``, ``run_dir``, ``next_sequence`` and ``status``.
     Protocol validation failures are returned in-band rather than raised. The
     first event of every run has sequence ``1``.
     """
@@ -410,9 +402,7 @@ class FluxVLAROSEvaluationReporter:
         self._logger = logger or overwatch.info
         self._feishu = _require_mapping(feishu or {}, 'feishu')
         self._active: Optional[_RunState] = None
-        self._requests: dict[str, _CachedRequest] = {}
         self._last_run_dir: Optional[Path] = None
-        self._lock = threading.RLock()
 
     def set_logger(self, logger=None) -> None:
         """Bind a runtime logger; ``None`` restores Overwatch."""
@@ -434,24 +424,21 @@ class FluxVLAROSEvaluationReporter:
                       *,
                       version=EVENT_VERSION) -> dict:
         """Validate and persist one evaluation lifecycle event."""
-        with self._lock:
-            try:
-                return self._process_event(event_type, request_id,
-                                           run_session_id, sequence, payload,
-                                           version)
-            # Protocol and artifact errors are returned in-band.
-            except Exception as exc:
-                error = f'{type(exc).__name__}: {exc}'
-                self._log(f'[ros-eval] rejected event: {error}')
-                active = self._active
-                return {
-                    'accepted': False,
-                    'duplicate': False,
-                    'error': error,
-                    'run_dir': str(active.run_dir) if active else self.run_dir,
-                    'next_sequence': active.next_sequence if active else 1,
-                    'status': 'running' if active else 'idle',
-                }
+        try:
+            return self._process_event(event_type, request_id, run_session_id,
+                                       sequence, payload, version)
+        # Protocol and artifact errors are returned in-band.
+        except Exception as exc:
+            error = f'{type(exc).__name__}: {exc}'
+            self._log(f'[zmq-eval] rejected event: {error}')
+            active = self._active
+            return {
+                'accepted': False,
+                'error': error,
+                'run_dir': str(active.run_dir) if active else self.run_dir,
+                'next_sequence': active.next_sequence if active else 1,
+                'status': 'running' if active else 'idle',
+            }
 
     def _process_event(self, event_type, request_id, run_session_id, sequence,
                        payload, version) -> dict:
@@ -466,21 +453,6 @@ class FluxVLAROSEvaluationReporter:
             raise EvaluationEventError(f'unsupported event version {version}; '
                                        f'expected {EVENT_VERSION}')
         payload = _require_mapping(payload, 'payload')
-        fingerprint = json.dumps(
-            [version, event_type, run_session_id, sequence, payload],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(',', ':'))
-
-        cached = self._requests.get(request_id)
-        if cached is not None:
-            if cached.fingerprint != fingerprint:
-                raise EvaluationEventError(
-                    f'request_id {request_id!r} was reused with different data'
-                )
-            response = copy.deepcopy(cached.response)
-            response['duplicate'] = True
-            return response
 
         if event_type == 'run_start':
             if self._active is not None:
@@ -505,31 +477,17 @@ class FluxVLAROSEvaluationReporter:
             if sequence != state.next_sequence:
                 raise EvaluationEventError(
                     f'expected sequence {state.next_sequence}, got {sequence}')
-            snapshot = self._snapshot_mutable_state(state)
-            try:
-                if event_type == 'episode_start':
-                    self._episode_start(state, payload)
-                    status = 'running'
-                elif event_type == 'episode_end':
-                    self._episode_end(state, payload)
-                    status = 'running'
-                else:
-                    status = self._run_end(state, payload)
-                    # Local finalization is intentionally completed before
-                    # the run_end event is committed. All local writes are
-                    # idempotent, so a transient filesystem failure can safely
-                    # retry the same request and sequence without duplicating
-                    # a Feishu row.
-                    summary_path = self._write_summary_artifacts(state)
-                self._append_event(state, version, event_type, request_id,
-                                   sequence, payload)
-            except Exception:
-                # Event handlers update in-memory progress before the durable
-                # journal append. Restore it when either an artifact write or
-                # the journal commit fails, so the same request/sequence can
-                # be retried without observing a half-accepted episode.
-                self._restore_mutable_state(state, snapshot)
-                raise
+            if event_type == 'episode_start':
+                self._episode_start(state, payload)
+                status = 'running'
+            elif event_type == 'episode_end':
+                self._episode_end(state, payload)
+                status = 'running'
+            else:
+                status = self._run_end(state, payload)
+                summary_path = self._write_summary_artifacts(state)
+            self._append_event(state, version, event_type, request_id,
+                               sequence, payload)
             state.next_sequence += 1
             response = self._response(state, status=status)
             if event_type == 'run_end':
@@ -540,26 +498,7 @@ class FluxVLAROSEvaluationReporter:
 
         response['error'] = ''
         response['accepted'] = True
-        response['duplicate'] = False
-        self._requests[request_id] = _CachedRequest(
-            fingerprint=fingerprint, response=copy.deepcopy(response))
         return response
-
-    @staticmethod
-    def _snapshot_mutable_state(state: _RunState) -> tuple[dict, int, set]:
-        return (
-            copy.deepcopy(state.active_episodes),
-            len(state.episodes),
-            set(state.completed_keys),
-        )
-
-    @staticmethod
-    def _restore_mutable_state(state: _RunState, snapshot: tuple[dict, int,
-                                                                 set]) -> None:
-        active_episodes, episode_count, completed_keys = snapshot
-        state.active_episodes = active_episodes
-        del state.episodes[episode_count:]
-        state.completed_keys = completed_keys
 
     def _start_run(self, session_id: str, payload: dict) -> _RunState:
         schema_version = payload.get('schema_version')
@@ -693,18 +632,17 @@ class FluxVLAROSEvaluationReporter:
             tasks_by_index=tasks_by_index,
         )
         self._append_log(
-            state, f'ROS evaluation session: {session_id}\n'
+            state, f'ZMQ evaluation session: {session_id}\n'
             f'task_suite: {self.task_suite_name}\n'
             f'model_family: {self.model_family}\n'
             f'config: {self.config_path}\n'
             f'ckpt: {self.ckpt_path}\n')
-        self._log(f'[ros-eval] run_start session={session_id} '
+        self._log(f'[zmq-eval] run_start session={session_id} '
                   f'episodes={total_episodes} run_dir={run_dir}')
         return state
 
     def _episode_start(self, state: _RunState, payload: dict) -> None:
-        task, episode_index, seed, description = self._episode_identity(
-            state, payload)
+        task, episode_index, seed = self._episode_identity(state, payload)
         started_at, started_epoch = _require_datetime(
             payload.get('started_at'), 'payload.started_at')
         key = (task.task_index, episode_index)
@@ -723,7 +661,7 @@ class FluxVLAROSEvaluationReporter:
         current = {
             'task_id': task.task_id,
             'task_index': task.task_index,
-            'description': description,
+            'description': task.description,
             'episode_index': episode_index,
             'seed': seed,
             'started_at': started_at,
@@ -735,15 +673,14 @@ class FluxVLAROSEvaluationReporter:
         self._append_log(
             state,
             f'Evaluating Task {task.task_index}, Trial {episode_index}\n'
-            f'\nTask: {description}\n'
+            f'\nTask: {task.description}\n'
             f'Starting episode {episode_index + 1}...\n')
         self._log(f'Evaluating Task {task.task_index}, Trial {episode_index}')
-        self._log(f'\nTask: {description}')
+        self._log(f'\nTask: {task.description}')
         self._log(f'Starting episode {episode_index + 1}...')
 
     def _episode_end(self, state: _RunState, payload: dict) -> None:
-        task, episode_index, seed, description = self._episode_identity(
-            state, payload)
+        task, episode_index, seed = self._episode_identity(state, payload)
         episode_key = (task.task_index, episode_index)
         current = state.active_episodes.get(episode_key)
         if current is None:
@@ -761,10 +698,8 @@ class FluxVLAROSEvaluationReporter:
             episode_id = _require_string(episode_id, 'payload.episode_id')
             current['episode_id'] = episode_id
         for key, value in (
-            ('task_index', task.task_index),
             ('episode_index', episode_index),
             ('seed', seed),
-            ('description', description),
         ):
             if current[key] != value:
                 raise EvaluationEventError(
@@ -864,21 +799,12 @@ class FluxVLAROSEvaluationReporter:
 
     def _episode_identity(
             self, state: _RunState,
-            payload: dict) -> tuple[_TaskManifestEntry, int, int, str]:
+            payload: dict) -> tuple[_TaskManifestEntry, int, int]:
         task_id = _require_string(payload.get('task_id'), 'payload.task_id')
-        task_index = _require_int(
-            payload.get('task_index'), 'payload.task_index', 0)
         task = state.tasks_by_id.get(task_id)
-        if task is None or task.task_index != task_index:
+        if task is None:
             raise EvaluationEventError(
-                f'task {task_id!r}/{task_index} is not in the run manifest')
-        description = _require_string(
-            payload.get('description', ''),
-            'payload.description',
-            allow_empty=True)
-        if description != task.description:
-            raise EvaluationEventError(
-                f'task {task_id!r} description changed during the run')
+                f'task {task_id!r} is not in the run manifest')
         episode_index = _require_int(
             payload.get('episode_index'), 'payload.episode_index', 0)
         episodes_per_task = self._episodes_for_task(state, task)
@@ -887,7 +813,7 @@ class FluxVLAROSEvaluationReporter:
                 f'payload.episode_index exceeds episodes_per_task for '
                 f'task {task.task_id!r}')
         seed = _require_int(payload.get('seed'), 'payload.seed')
-        return task, episode_index, seed, description
+        return task, episode_index, seed
 
     def _run_end(self, state: _RunState, payload: dict) -> str:
         status = _require_string(payload.get('status'),
@@ -922,7 +848,7 @@ class FluxVLAROSEvaluationReporter:
             f'# episodes completed: {completed}\n'
             f'# successes: '
             f"{sum(bool(item['success']) for item in state.episodes)}\n")
-        self._log(f'[ros-eval] run_end status={status} '
+        self._log(f'[zmq-eval] run_end status={status} '
                   f'episodes={completed}/{total} run_dir={state.run_dir}')
         return status
 
@@ -930,7 +856,7 @@ class FluxVLAROSEvaluationReporter:
                               summary_path: Path) -> dict:
         eligible, reason = self._feishu_eligibility(state, end)
         if not eligible:
-            self._log(f'[ros-eval] Feishu skipped: {reason}')
+            self._log(f'[zmq-eval] Feishu skipped: {reason}')
             return {
                 'reported_to_feishu': False,
                 'report_reason': reason,
@@ -949,7 +875,7 @@ class FluxVLAROSEvaluationReporter:
                 log_unconfigured=True)
         except Exception as exc:  # Feishu is best effort after local commit.
             reason = f'{type(exc).__name__}: {exc}'
-            self._log(f'[ros-eval] Feishu skipped: {reason}')
+            self._log(f'[zmq-eval] Feishu skipped: {reason}')
             return {
                 'reported_to_feishu': False,
                 'report_reason': reason,
@@ -1095,7 +1021,7 @@ class FluxVLAROSEvaluationReporter:
         if all_scores:
             self._log(f'# mean score: '
                       f'{sum(all_scores) / len(all_scores) * 100:.1f}%')
-        self._log(f'[ros-eval] wrote {self.report_kind.upper()} summary '
+        self._log(f'[zmq-eval] wrote {self.report_kind.upper()} summary '
                   f'artifacts to {state.run_dir}')
         return summary_path
 
@@ -1407,11 +1333,11 @@ class FluxVLAROSEvaluationReporter:
         (state.run_dir / 'summary.txt').write_text(
             '\n'.join(text_lines) + '\n', encoding='utf-8')
 
-        self._log('[ros-eval] RoboDojo official overview (Score/SR%):\n'
+        self._log('[zmq-eval] RoboDojo official overview (Score/SR%):\n'
                   f'{overview_header}\n{overview_separator}\n{overview_row}')
-        self._log(f'[ros-eval] official task cells '
+        self._log(f'[zmq-eval] official task cells '
                   f'{completed_task_cells}/{expected_task_cells}')
-        self._log(f'[ros-eval] wrote RoboDojo summary artifacts to '
+        self._log(f'[zmq-eval] wrote RoboDojo summary artifacts to '
                   f'{state.run_dir}')
         return summary_path
 
@@ -1593,7 +1519,7 @@ class FluxVLAROSEvaluationReporter:
         _write_json_atomic(summary_path, summary)
         self._log(f'# episodes completed: {total_trials}')
         self._log(f'# successes: {total_successes} ({overall_rate:.1f}%)')
-        self._log(f'[ros-eval] wrote RoboCasa summary artifacts to '
+        self._log(f'[zmq-eval] wrote RoboCasa summary artifacts to '
                   f'{state.run_dir}')
         return summary_path
 
@@ -1833,7 +1759,7 @@ class FluxVLAROSEvaluationReporter:
                 else:
                     journal_path.unlink(missing_ok=True)
             except OSError as rollback_error:
-                self._log('[ros-eval] failed to roll back journal append: '
+                self._log('[zmq-eval] failed to roll back journal append: '
                           f'{rollback_error}')
             raise
 
@@ -1847,7 +1773,6 @@ class FluxVLAROSEvaluationReporter:
     def _response(self, state: _RunState, status: str) -> dict:
         return {
             'accepted': True,
-            'duplicate': False,
             'error': '',
             'run_dir': str(state.run_dir),
             'next_sequence': state.next_sequence,
@@ -1859,7 +1784,7 @@ class FluxVLAROSEvaluationReporter:
             self._logger(message)
         # Logging must never fail evaluation reporting.
         except Exception as exc:
-            overwatch.warning(f'[ros-eval] logger failed: {exc}; {message}')
+            overwatch.warning(f'[zmq-eval] logger failed: {exc}; {message}')
 
 
-__all__ = ['EvaluationEventError', 'FluxVLAROSEvaluationReporter']
+__all__ = ['EvaluationEventError', 'FluxVLAEvaluationReporter']
