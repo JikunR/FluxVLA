@@ -1,7 +1,6 @@
 """Stateless, multi-node ZMQ inference service for FluxThemis."""
 
 from __future__ import annotations
-import argparse
 import copy
 import hashlib
 import json
@@ -9,20 +8,20 @@ import multiprocessing
 import os
 import signal
 import socket as network_socket
-import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .policy import (build_policy_from_config, config_get,
-                     cuda_visibility_token, get_server_config, require_mapping,
+from .policy import (build_policy_from_config, config_get, get_server_config,
+                     require_mapping,
                      resolve_checkpoint_path, resolve_report_config_path,
                      resolve_report_result_root)
 from .zmq_protocol import (decode_frame, decode_header, empty_payload,
@@ -41,18 +40,10 @@ class _PendingRequest:
 class _ModelWorkerState:
     identity: bytes
     worker_id: str
-    supervisor_id: str
     node_id: str
     device: str
     status: str
     request_id: str | None = None
-
-
-@dataclass
-class _SupervisorState:
-    identity: bytes
-    supervisor_id: str
-    worker_count: int
 
 
 class StatelessZMQCoordinator:
@@ -61,9 +52,8 @@ class StatelessZMQCoordinator:
     def __init__(self,
                  frontend_bind: str,
                  backend_bind: str,
-                 control_bind: str,
                  evaluation_reporter: Any = None,
-                 expected_supervisors: int = 1,
+                 expected_workers: int = 1,
                  max_pending_requests: int = 128,
                  request_timeout_s: float = 120.0,
                  startup_timeout_s: float = 900.0,
@@ -72,10 +62,9 @@ class StatelessZMQCoordinator:
                  deployment_id: str | None = None) -> None:
         self.frontend_bind = _endpoint(frontend_bind, 'frontend_bind')
         self.backend_bind = _endpoint(backend_bind, 'backend_bind')
-        self.control_bind = _endpoint(control_bind, 'control_bind')
         self.evaluation_reporter = evaluation_reporter
-        self.expected_supervisors = _positive_int(expected_supervisors,
-                                                  'expected_supervisors')
+        self.expected_workers = _positive_int(expected_workers,
+                                              'expected_workers')
         self.max_pending_requests = _positive_int(max_pending_requests,
                                                   'max_pending_requests')
         self.request_timeout_s = _positive_float(request_timeout_s,
@@ -90,16 +79,12 @@ class StatelessZMQCoordinator:
         self._workers: dict[bytes, _ModelWorkerState] = {}
         self._workers_by_id: dict[str, bytes] = {}
         self._idle_workers: deque[bytes] = deque()
-        self._supervisors: dict[str, _SupervisorState] = {}
-        self._shutdown_completed: set[str] = set()
         self._pending: deque[_PendingRequest] = deque()
         self._requests: dict[str, _PendingRequest] = {}
         self._running = False
         self._shutdown_started = False
-        self._shutdown_deadline: float | None = None
         self._frontend = None
         self._backend = None
-        self._control = None
         self._context = None
 
     @property
@@ -108,27 +93,13 @@ class StatelessZMQCoordinator:
                    for worker in self._workers.values())
 
     @property
-    def expected_workers(self) -> int:
-        return sum(supervisor.worker_count
-                   for supervisor in self._supervisors.values())
-
-    @property
     def status(self) -> str:
         if self._shutdown_started:
             return 'stopping'
         return 'ready' if self._all_workers_ready() else 'starting'
 
     def _all_workers_ready(self) -> bool:
-        if len(self._supervisors) != self.expected_supervisors:
-            return False
-        ready_workers = [
-            worker for worker in self._workers.values()
-            if worker.status in {'idle', 'busy'}
-        ]
-        return (len(ready_workers) == self.expected_workers and all(
-            sum(worker.supervisor_id == supervisor_id
-                for worker in ready_workers) == supervisor.worker_count
-            for supervisor_id, supervisor in self._supervisors.items()))
+        return self.ready_workers == self.expected_workers
 
     def run(self) -> None:
         import zmq
@@ -136,26 +107,22 @@ class StatelessZMQCoordinator:
         self._context = zmq.Context()
         self._frontend = self._context.socket(zmq.ROUTER)
         self._backend = self._context.socket(zmq.ROUTER)
-        self._control = self._context.socket(zmq.ROUTER)
-        for current in (self._frontend, self._backend, self._control):
+        for current in (self._frontend, self._backend):
             current.setsockopt(zmq.LINGER, 0)
             current.setsockopt(zmq.SNDHWM, self.max_pending_requests * 2)
             current.setsockopt(zmq.RCVHWM, self.max_pending_requests * 2)
         self._frontend.bind(self.frontend_bind)
         self._backend.bind(self.backend_bind)
-        self._control.bind(self.control_bind)
         poller = zmq.Poller()
         poller.register(self._frontend, zmq.POLLIN)
         poller.register(self._backend, zmq.POLLIN)
-        poller.register(self._control, zmq.POLLIN)
         self._running = True
         self._install_signal_handlers()
         self._write_manifest()
         startup_deadline = time.monotonic() + self.startup_timeout_s
         print(
             '[FluxVLA] ZMQ coordinator listening '
-            f'frontend={self.frontend_bind} backend={self.backend_bind} '
-            f'control={self.control_bind}',
+            f'frontend={self.frontend_bind} backend={self.backend_bind}',
             flush=True)
         try:
             while self._running:
@@ -164,8 +131,6 @@ class StatelessZMQCoordinator:
                     self._receive_frontend()
                 if self._backend in events:
                     self._receive_backend()
-                if self._control in events:
-                    self._receive_control()
                 self._expire_requests()
                 self._dispatch_pending()
                 if (self.status == 'starting'
@@ -174,18 +139,14 @@ class StatelessZMQCoordinator:
                         f'only {self.ready_workers}/'
                         f'{self.expected_workers} model workers became '
                         'ready')
-                supervisors_stopped = (
-                    not self._supervisors
-                    or self._shutdown_completed >= set(self._supervisors))
-                if (self._shutdown_started and not self._requests
-                        and (supervisors_stopped or self._shutdown_expired())):
+                if self._shutdown_started and not self._requests:
                     self._running = False
         finally:
             self._begin_shutdown()
             self._write_manifest()
-            for current in (self._frontend, self._backend, self._control):
+            for current in (self._frontend, self._backend):
                 if current is not None:
-                    current.close(linger=0)
+                    current.close(linger=1000)
             if self._context is not None:
                 self._context.term()
 
@@ -323,7 +284,6 @@ class StatelessZMQCoordinator:
             worker = _ModelWorkerState(
                 identity=identity,
                 worker_id=worker_id,
-                supervisor_id=_required_string(header, 'supervisor_id'),
                 node_id=str(header.get('node_id', '')),
                 device=str(header.get('device', '')),
                 status=worker_status,
@@ -370,33 +330,6 @@ class StatelessZMQCoordinator:
         response_header['ok'] = True
         self._send_frontend(pending.route, encode_frame(response_header),
                             payload)
-
-    def _receive_control(self) -> None:
-        frames = self._control.recv_multipart()
-        if len(frames) < 2:
-            raise RuntimeError('supervisor message is missing a header')
-        identity = frames[0]
-        header = decode_header(frames[1])
-        self._validate_deployment(header)
-        message_type = header['type']
-        supervisor_id = _required_string(header, 'supervisor_id')
-        if message_type == 'register_supervisor':
-            if supervisor_id in self._supervisors:
-                raise RuntimeError(f'duplicate supervisor {supervisor_id!r}')
-            self._supervisors[supervisor_id] = _SupervisorState(
-                identity=identity,
-                supervisor_id=supervisor_id,
-                worker_count=_required_positive_int(header, 'worker_count'),
-            )
-        elif message_type == 'worker_exit':
-            worker_id = _required_string(header, 'worker_id')
-            raise RuntimeError(f'model worker {worker_id} exited with code '
-                               f'{header.get("exit_code")}')
-        elif message_type == 'shutdown_completed':
-            self._shutdown_completed.add(supervisor_id)
-        else:
-            raise ValueError(
-                f'Unknown server-supervisor message {message_type!r}')
 
     def _dispatch_pending(self) -> None:
         while self._pending:
@@ -510,21 +443,16 @@ class StatelessZMQCoordinator:
         if self._shutdown_started:
             return
         self._shutdown_started = True
-        self._shutdown_deadline = time.monotonic() + 10.0
-        for supervisor in self._supervisors.values():
-            self._control.send_multipart([
-                supervisor.identity,
+        for worker in self._workers.values():
+            self._backend.send_multipart([
+                worker.identity,
                 encode_header(
-                    'shutdown_node',
+                    'shutdown_worker',
                     deployment_id=self.deployment_id,
-                    supervisor_id=supervisor.supervisor_id,
+                    worker_id=worker.worker_id,
                 ),
                 empty_payload(),
             ])
-
-    def _shutdown_expired(self) -> bool:
-        return (self._shutdown_deadline is not None
-                and time.monotonic() >= self._shutdown_deadline)
 
     def _write_manifest(self) -> None:
         if self.manifest_path is None:
@@ -550,7 +478,6 @@ class StatelessZMQCoordinator:
         os.replace(temporary, self.manifest_path)
 
     def _install_signal_handlers(self) -> None:
-        import threading
         if threading.current_thread() is not threading.main_thread():
             return
 
@@ -561,186 +488,18 @@ class StatelessZMQCoordinator:
         signal.signal(signal.SIGINT, stop)
 
 
-class ServerSupervisor:
-    """Own the fixed model-worker set on one host."""
-
-    def __init__(
-            self,
-            control_endpoint: str,
-            backend_endpoint: str,
-            config_path: str,
-            ckpt_path: str,
-            devices: Sequence[str],
-            supervisor_id: str,
-            node_id: str,
-            deployment_id: str,
-            cfg_options: Mapping[str, Any] | None = None,
-            shutdown_timeout_s: float = 20.0,
-            coordinator_process: multiprocessing.Process | None = None
-    ) -> None:
-        self.control_endpoint = _endpoint(control_endpoint, 'control_endpoint')
-        self.backend_endpoint = _endpoint(backend_endpoint, 'backend_endpoint')
-        self.config_path = str(Path(config_path).expanduser().resolve())
-        self.ckpt_path = str(Path(ckpt_path).expanduser().resolve())
-        self.devices = tuple(devices)
-        if not self.devices:
-            raise ValueError('devices cannot be empty')
-        self.supervisor_id = _nonempty(supervisor_id, 'supervisor_id')
-        self.node_id = _nonempty(node_id, 'node_id')
-        self.deployment_id = _nonempty(deployment_id, 'deployment_id')
-        self.cfg_options = dict(cfg_options or {})
-        self.shutdown_timeout_s = _positive_float(shutdown_timeout_s,
-                                                  'shutdown_timeout_s')
-        self.coordinator_process = coordinator_process
-        self._processes: dict[str, subprocess.Popen] = {}
-        self._shutting_down = False
-
-    def run(self) -> None:
-        import zmq
-
-        context = zmq.Context()
-        control = context.socket(zmq.DEALER)
-        control.setsockopt(zmq.IDENTITY, self.supervisor_id.encode())
-        control.setsockopt(zmq.LINGER, 0)
-        control.connect(self.control_endpoint)
-        poller = zmq.Poller()
-        poller.register(control, zmq.POLLIN)
-        self._send_control(
-            control, 'register_supervisor', worker_count=len(self.devices))
-        for slot, device in enumerate(self.devices):
-            worker_id = f'{self.node_id}-gpu-{slot}'
-            self._start_worker(worker_id, device)
-        try:
-            while not self._shutting_down:
-                events = dict(poller.poll(timeout=200))
-                if control in events:
-                    header = decode_header(control.recv_multipart()[0])
-                    if header.get('deployment_id') != self.deployment_id:
-                        raise RuntimeError('ZMQ deployment_id mismatch')
-                    if header['type'] != 'shutdown_node':
-                        raise ValueError(f'Unknown supervisor command '
-                                         f'{header["type"]!r}')
-                    self._shutting_down = True
-                if (not self._shutting_down
-                        and self.coordinator_process is not None
-                        and self.coordinator_process.exitcode is not None):
-                    if self.coordinator_process.exitcode == 0:
-                        self._shutting_down = True
-                    else:
-                        raise RuntimeError(
-                            'server coordinator exited with code '
-                            f'{self.coordinator_process.exitcode}')
-                self._monitor_workers(control)
-        finally:
-            self._shutting_down = True
-            self._stop_all_workers()
-            try:
-                self._send_control(control, 'shutdown_completed')
-            except Exception:
-                pass
-            control.close(linger=0)
-            context.term()
-
-    def _start_worker(self, worker_id: str, device: str) -> None:
-        command = [
-            sys.executable,
-            '-m',
-            'fluxvla.engines.runners.serving.distributed_server',
-            'model-worker',
-            '--config',
-            self.config_path,
-            '--ckpt-path',
-            self.ckpt_path,
-            '--backend-endpoint',
-            self.backend_endpoint,
-            '--worker-id',
-            worker_id,
-            '--supervisor-id',
-            self.supervisor_id,
-            '--node-id',
-            self.node_id,
-            '--deployment-id',
-            self.deployment_id,
-            '--device',
-            'cuda:0' if cuda_visibility_token(device) is not None else device,
-            '--parent-pid',
-            str(os.getpid()),
-            '--cfg-options-json',
-            json.dumps(self.cfg_options),
-        ]
-        environment = os.environ.copy()
-        physical_device = cuda_visibility_token(device)
-        if physical_device is not None:
-            environment['CUDA_VISIBLE_DEVICES'] = physical_device
-        process = subprocess.Popen(
-            command, env=environment, start_new_session=True)
-        self._processes[worker_id] = process
-
-    def _monitor_workers(self, control: Any) -> None:
-        for worker_id, process in list(self._processes.items()):
-            exit_code = process.poll()
-            if exit_code is None:
-                continue
-            self._send_control(
-                control,
-                'worker_exit',
-                worker_id=worker_id,
-                exit_code=exit_code,
-            )
-            del self._processes[worker_id]
-            if not self._shutting_down:
-                raise RuntimeError(
-                    f'model worker {worker_id} exited with code {exit_code}')
-
-    def _stop_all_workers(self) -> None:
-        processes = list(self._processes.values())
-        for process in processes:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-        deadline = time.monotonic() + self.shutdown_timeout_s
-        for process in processes:
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-        self._processes.clear()
-
-    def _send_control(self, control: Any, message_type: str,
-                      **values: Any) -> None:
-        control.send_multipart([
-            encode_header(
-                message_type,
-                deployment_id=self.deployment_id,
-                supervisor_id=self.supervisor_id,
-                **values,
-            ),
-            empty_payload(),
-        ])
-
-
 def run_model_worker(config_path: str,
                      ckpt_path: str,
                      backend_endpoint: str,
                      worker_id: str,
-                     supervisor_id: str,
                      node_id: str,
                      deployment_id: str,
                      device: str,
-                     cfg_options: Mapping[str, Any] | None = None,
-                     parent_pid: int | None = None) -> None:
+                     cfg_options: Mapping[str, Any] | None = None) -> None:
     """Load one model replica and serve independent prediction requests."""
     import zmq
     from mmengine import Config
 
-    _configure_child_lifetime(parent_pid)
     from fluxvla.engines.utils.torch_utils import \
         configure_inference_attention_defaults
     configure_inference_attention_defaults()
@@ -759,7 +518,6 @@ def run_model_worker(config_path: str,
         encode_header(
             'register_worker',
             **common,
-            supervisor_id=supervisor_id,
             node_id=node_id,
             device=device,
         ),
@@ -783,6 +541,8 @@ def run_model_worker(config_path: str,
             raise RuntimeError('ZMQ deployment_id mismatch')
         if header.get('worker_id') != worker_id:
             raise RuntimeError('model worker identity mismatch')
+        if header['type'] == 'shutdown_worker':
+            break
         if header['type'] != 'predict':
             raise RuntimeError(
                 f'Unexpected model worker command {header["type"]!r}')
@@ -879,30 +639,27 @@ def build_evaluation_reporter_from_config(
 def launch_server_task(*,
                        config_path: str,
                        ckpt_path: str,
-                       devices: Sequence[str],
+                       device: str,
                        frontend_bind: str,
                        backend_bind: str,
-                       control_bind: str,
                        backend_endpoint: str,
-                       control_endpoint: str,
                        advertised_endpoint: str,
                        manifest_path: str | None,
                        max_pending_requests: int,
                        request_timeout_s: float,
                        startup_timeout_s: float,
                        cfg_options: Mapping[str, Any] | None = None,
-                       node_rank: int | None = None,
+                       rank: int | None = None,
                        world_size: int | None = None,
                        deployment_id: str | None = None) -> None:
-    """Run one node-local server supervisor process."""
-    node_rank = int(
-        os.environ.get('RANK', '0') if node_rank is None else node_rank)
+    """Run one torchrun model worker and the rank-zero coordinator."""
+    rank = int(os.environ.get('RANK', '0') if rank is None else rank)
     world_size = int(
         os.environ.get('WORLD_SIZE', '1') if world_size is None else world_size
     )
-    if node_rank < 0 or node_rank >= world_size:
-        raise ValueError('node_rank must be in [0, world_size)')
-    node_id = f'{network_socket.gethostname()}-rank-{node_rank}'
+    if rank < 0 or rank >= world_size:
+        raise ValueError('rank must be in [0, world_size)')
+    node_id = f'{network_socket.gethostname()}-rank-{rank}'
     if deployment_id is None:
         deployment_id = (
             os.environ.get('FLUXVLA_DEPLOYMENT_ID')
@@ -917,7 +674,8 @@ def launch_server_task(*,
         deployment_id = hashlib.sha256(stable.encode()).hexdigest()[:32]
 
     coordinator_process = None
-    if node_rank == 0:
+    coordinator_watcher = None
+    if rank == 0:
         context = multiprocessing.get_context('spawn')
         coordinator_process = context.Process(
             target=_coordinator_process_main,
@@ -927,10 +685,9 @@ def launch_server_task(*,
                 'cfg_options': dict(cfg_options or {}),
                 'frontend_bind': frontend_bind,
                 'backend_bind': backend_bind,
-                'control_bind': control_bind,
                 'advertised_endpoint': advertised_endpoint,
                 'manifest_path': manifest_path,
-                'expected_supervisors': world_size,
+                'expected_workers': world_size,
                 'max_pending_requests': max_pending_requests,
                 'request_timeout_s': request_timeout_s,
                 'startup_timeout_s': startup_timeout_s,
@@ -939,31 +696,56 @@ def launch_server_task(*,
             },
             name='fluxvla-zmq-coordinator',
         )
-        coordinator_process.start()
+        _start_coordinator_process(coordinator_process)
+        coordinator_watcher = threading.Thread(
+            target=_terminate_on_coordinator_failure,
+            args=(coordinator_process, os.getpid()),
+            daemon=True,
+        )
+        coordinator_watcher.start()
 
-    supervisor = ServerSupervisor(
-        control_endpoint=control_endpoint,
-        backend_endpoint=backend_endpoint,
-        config_path=config_path,
-        ckpt_path=ckpt_path,
-        devices=devices,
-        supervisor_id=f'server-supervisor-{node_id}',
-        node_id=node_id,
-        deployment_id=deployment_id,
-        cfg_options=cfg_options,
-        coordinator_process=coordinator_process,
-    )
     try:
-        supervisor.run()
-    finally:
+        run_model_worker(
+            config_path=config_path,
+            ckpt_path=ckpt_path,
+            backend_endpoint=backend_endpoint,
+            worker_id=f'model-worker-{rank}',
+            node_id=node_id,
+            deployment_id=deployment_id,
+            device=device,
+            cfg_options=cfg_options,
+        )
+    except BaseException:
         if coordinator_process is not None:
-            coordinator_process.join(timeout=15.0)
             if coordinator_process.is_alive():
                 coordinator_process.terminate()
-                coordinator_process.join(timeout=5.0)
-            if coordinator_process.exitcode not in {0, -signal.SIGTERM}:
-                raise RuntimeError('server coordinator exited with code '
-                                   f'{coordinator_process.exitcode}')
+            coordinator_watcher.join()
+        raise
+    else:
+        if coordinator_watcher is not None:
+            coordinator_watcher.join()
+
+
+def _start_coordinator_process(process: multiprocessing.Process) -> None:
+    """Start the Coordinator outside the model workers' ProcessGroup."""
+    world_size = os.environ.pop('WORLD_SIZE', None)
+    try:
+        process.start()
+    finally:
+        if world_size is not None:
+            os.environ['WORLD_SIZE'] = world_size
+
+
+def _terminate_on_coordinator_failure(process: multiprocessing.Process,
+                                      parent_pid: int) -> None:
+    process.join()
+    if process.exitcode not in {0, -signal.SIGTERM}:
+        print(
+            f'[FluxVLA] coordinator exited with code {process.exitcode}',
+            file=sys.stderr,
+            flush=True,
+        )
+        os.kill(parent_pid, signal.SIGTERM)
 
 
 def _coordinator_process_main(*,
@@ -972,10 +754,9 @@ def _coordinator_process_main(*,
                               cfg_options: Mapping[str, Any],
                               frontend_bind: str,
                               backend_bind: str,
-                              control_bind: str,
                               advertised_endpoint: str,
                               manifest_path: str | None,
-                              expected_supervisors: int,
+                              expected_workers: int,
                               max_pending_requests: int,
                               request_timeout_s: float,
                               startup_timeout_s: float,
@@ -992,10 +773,9 @@ def _coordinator_process_main(*,
         evaluation_reporter=reporter,
         frontend_bind=frontend_bind,
         backend_bind=backend_bind,
-        control_bind=control_bind,
         advertised_endpoint=advertised_endpoint,
         manifest_path=manifest_path,
-        expected_supervisors=expected_supervisors,
+        expected_workers=expected_workers,
         max_pending_requests=max_pending_requests,
         request_timeout_s=request_timeout_s,
         startup_timeout_s=startup_timeout_s,
@@ -1065,47 +845,7 @@ def _required_int(header: Mapping[str, Any],
     return int(value)
 
 
-def _parse_worker_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--ckpt-path', required=True)
-    parser.add_argument('--backend-endpoint', required=True)
-    parser.add_argument('--worker-id', required=True)
-    parser.add_argument('--supervisor-id', required=True)
-    parser.add_argument('--node-id', required=True)
-    parser.add_argument('--deployment-id', required=True)
-    parser.add_argument('--device', required=True)
-    parser.add_argument('--parent-pid', type=int, default=None)
-    parser.add_argument('--cfg-options-json', default='{}')
-    return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] != 'model-worker':
-        raise SystemExit('distributed_server only exposes model-worker '
-                         'internally; use scripts/distributed_zmq_server.py')
-    args = _parse_worker_args(argv[1:])
-    run_model_worker(
-        config_path=args.config,
-        ckpt_path=args.ckpt_path,
-        backend_endpoint=args.backend_endpoint,
-        worker_id=args.worker_id,
-        supervisor_id=args.supervisor_id,
-        node_id=args.node_id,
-        deployment_id=args.deployment_id,
-        device=args.device,
-        cfg_options=json.loads(args.cfg_options_json),
-        parent_pid=args.parent_pid,
-    )
-    return 0
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())
-
 __all__ = [
-    'ServerSupervisor',
     'StatelessZMQCoordinator',
     'build_evaluation_reporter_from_config',
     'launch_server_task',

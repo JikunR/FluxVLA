@@ -4,37 +4,28 @@
 from __future__ import annotations
 import argparse
 import os
-from collections.abc import MutableMapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
 DEFAULT_FRONTEND_BIND = 'tcp://0.0.0.0:15555'
 DEFAULT_MODEL_WORKER_BIND = 'tcp://0.0.0.0:15556'
-DEFAULT_SUPERVISOR_BIND = 'tcp://0.0.0.0:15557'
 DEFAULT_MAX_PENDING_REQUESTS = 128
 DEFAULT_REQUEST_TIMEOUT_S = 120.0
 DEFAULT_STARTUP_TIMEOUT_S = 900.0
 
-_CLUSTER_ENVIRONMENT = (
-    ('RANK', 'MLP_ROLE_INDEX', '0'),
-    ('WORLD_SIZE', 'MLP_WORKER_NUM', '1'),
-    ('MASTER_ADDR', 'MLP_WORKER_0_HOST', '127.0.0.1'),
-    ('MASTER_PORT', 'MLP_WORKER_0_PORT', '29500'),
-)
 
-
-def _normalize_cluster_environment(
-        environ: MutableMapping[str, str]) -> tuple[int, int, str]:
-    """Normalize standard and PAI multi-node environment variables."""
-    for name, alias, default in _CLUSTER_ENVIRONMENT:
-        environ[name] = environ.get(name) or environ.get(alias) or default
-    node_rank = int(environ['RANK'])
-    world_size = int(environ['WORLD_SIZE'])
+def _torchrun_environment() -> tuple[int, int, int, str]:
+    rank = int(os.environ.get('RANK', '0'))
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
     if world_size < 1:
         raise ValueError('WORLD_SIZE must be positive')
-    if node_rank < 0 or node_rank >= world_size:
+    if rank < 0 or rank >= world_size:
         raise ValueError('RANK must be in [0, WORLD_SIZE)')
-    return node_rank, world_size, environ['MASTER_ADDR']
+    if local_rank < 0:
+        raise ValueError('LOCAL_RANK must be non-negative')
+    return (rank, world_size, local_rank,
+            os.environ.get('MASTER_ADDR', '127.0.0.1'))
 
 
 def parse_args(argv=None):
@@ -44,17 +35,6 @@ def parse_args(argv=None):
         description='Launch the stateless FluxVLA ZMQ inference service.')
     parser.add_argument('--config', required=True)
     parser.add_argument('--ckpt-path', default=None)
-    worker_group = parser.add_mutually_exclusive_group()
-    worker_group.add_argument(
-        '--num-workers',
-        type=int,
-        default=None,
-        help='Number of local model workers on every node.')
-    worker_group.add_argument(
-        '--devices',
-        type=_parse_devices,
-        default=None,
-        help='Override auto-detected local GPUs, for example 0,1.')
     networking = parser.add_argument_group('advanced networking')
     networking.add_argument(
         '--frontend-bind',
@@ -67,19 +47,9 @@ def parse_args(argv=None):
         help=f'Internal model-worker bind address (default: '
         f'{DEFAULT_MODEL_WORKER_BIND}).')
     networking.add_argument(
-        '--control-bind',
-        default=DEFAULT_SUPERVISOR_BIND,
-        help=f'Internal supervisor bind address (default: '
-        f'{DEFAULT_SUPERVISOR_BIND}).')
-    networking.add_argument(
         '--backend-endpoint',
         default=None,
         help='Address model workers connect to; defaults to the backend port '
-        'on MASTER_ADDR.')
-    networking.add_argument(
-        '--control-endpoint',
-        default=None,
-        help='Address supervisors connect to; defaults to the control port '
         'on MASTER_ADDR.')
     networking.add_argument(
         '--advertise-endpoint',
@@ -104,15 +74,6 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _parse_devices(value: str) -> tuple[str, ...]:
-    devices = tuple(item.strip() for item in value.split(',') if item.strip())
-    if not devices:
-        raise argparse.ArgumentTypeError('--devices cannot be empty')
-    if len(devices) != len(set(devices)):
-        raise argparse.ArgumentTypeError('--devices cannot contain duplicates')
-    return devices
-
-
 def _connect_endpoint(bind: str, host: str) -> str:
     parsed = urlsplit(bind)
     if parsed.scheme != 'tcp' or parsed.port is None:
@@ -127,11 +88,10 @@ def main(argv=None) -> int:
         launch_server_task
     from fluxvla.engines.runners.serving.policy import (
         config_get, get_server_config, require_mapping,
-        resolve_checkpoint_path, resolve_inference_devices)
+        resolve_checkpoint_path)
 
     args = parse_args(argv)
-    node_rank, world_size, master_addr = _normalize_cluster_environment(
-        os.environ)
+    rank, world_size, local_rank, master_addr = _torchrun_environment()
     config_path = str(Path(args.config).expanduser().resolve(strict=True))
     cfg = Config.fromfile(config_path)
     if args.cfg_options:
@@ -144,21 +104,13 @@ def main(argv=None) -> int:
     checkpoint = resolve_checkpoint_path(
         args.ckpt_path or server_cfg.get('ckpt_path')
         or section_cfg.get('ckpt_path'))
-    devices = resolve_inference_devices(
-        worker_devices=args.devices, num_workers=args.num_workers)
-    device_list = ','.join(devices)
     print(
-        f'[FluxVLA] rank={node_rank} starting {len(devices)} '
-        'local model workers '
-        f'on {device_list}',
+        f'[FluxVLA] rank={rank} starting model worker on cuda:{local_rank}',
         flush=True)
     frontend_bind = args.frontend_bind
     backend_bind = args.backend_bind
-    control_bind = args.control_bind
     backend_endpoint = (
         args.backend_endpoint or _connect_endpoint(backend_bind, master_addr))
-    control_endpoint = (
-        args.control_endpoint or _connect_endpoint(control_bind, master_addr))
     advertised_endpoint = (
         args.advertise_endpoint
         or _connect_endpoint(frontend_bind, master_addr))
@@ -167,19 +119,17 @@ def main(argv=None) -> int:
     launch_server_task(
         config_path=config_path,
         ckpt_path=str(checkpoint),
-        devices=devices,
+        device=f'cuda:{local_rank}',
         frontend_bind=frontend_bind,
         backend_bind=backend_bind,
-        control_bind=control_bind,
         backend_endpoint=backend_endpoint,
-        control_endpoint=control_endpoint,
         advertised_endpoint=advertised_endpoint,
         manifest_path=manifest_path,
         max_pending_requests=args.max_pending_requests,
         request_timeout_s=args.request_timeout_s,
         startup_timeout_s=args.startup_timeout_s,
         cfg_options=args.cfg_options,
-        node_rank=node_rank,
+        rank=rank,
         world_size=world_size,
     )
     return 0

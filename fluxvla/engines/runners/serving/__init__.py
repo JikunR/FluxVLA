@@ -27,7 +27,6 @@ def __getattr__(name):
         'FluxVLAEvaluationReporter',
     }
     _distributed_server = {
-        'ServerSupervisor',
         'StatelessZMQCoordinator',
         'build_evaluation_reporter_from_config',
         'launch_server_task',
@@ -63,7 +62,6 @@ __all__ = [
     'ObsSerializerProto',
     'PolicyServer',
     'create_server',
-    'ServerSupervisor',
     'StatelessZMQCoordinator',
     'build_evaluation_reporter_from_config',
     'build_policy_from_config',
